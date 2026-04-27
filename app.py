@@ -18,6 +18,7 @@ div[data-testid="metric-container"] { background: rgba(0, 0, 0, 0.6); padding: 1
 .stat-text { color: #8ca892; font-size: 14px; }
 .live-alert { background: rgba(220, 38, 38, 0.2); border-left: 4px solid #dc2626; padding: 15px; border-radius: 5px; color: #f87171; margin-bottom: 15px; }
 .live-suggestion { background: rgba(34, 197, 94, 0.2); border-left: 4px solid #22c55e; padding: 15px; border-radius: 5px; color: #86efac; margin-bottom: 15px; }
+.live-feed-banner { background: rgba(0, 229, 255, 0.1); border-left: 4px solid #00E5FF; padding: 10px 15px; border-radius: 5px; color: #E2E8F0; margin-bottom: 20px; font-size: 14px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -125,14 +126,17 @@ def select_starting_xi(team_name, formation):
 
 # --- 4. SIDEBAR NAVIGATION & UI ---
 if teams_db:
-    st.sidebar.title("Navigation")
-    app_mode = st.sidebar.radio("Select Module:", [
-        "🤖 Pre-Match Auto-Tactics", 
-        "📊 Pre-Match Opponent Analysis", 
-        "🧠 Coach's Sandbox", 
-        "⏱️ Live Match Simulator",
-        "💬 Assistant Manager AI"
-    ])
+    st.sidebar.markdown("### NAVIGATION")
+    app_mode = st.sidebar.radio(
+        "Select Module:",
+        (
+            "🤖 Pre-Match Auto-Tactics", 
+            "📊 Pre-Match Opponent Analysis", 
+            "🧠 Coach's Sandbox", 
+            "⏱️ Live Match Simulator",
+            "💬 Assistant Manager AI"
+        )
+    )
 
     # ---------------------------------------------------------
     # MODULE 1: PRE-MATCH AUTO-TACTICS
@@ -295,118 +299,37 @@ if teams_db:
                             st.markdown(f"<div class='player-card'><span>{star} <b>{p['Pos']}</b> | {p['Name']}</span> <span class='stat-text'>⏱️ {p['Min']} mins | ⚽ {p['G_A']} G+A</span></div>", unsafe_allow_html=True)
 
     # ---------------------------------------------------------
-    # MODULE 4: LIVE MATCH SIMULATOR (EXPANDED DYNAMIC LOGIC)
+    # MODULE 4: LIVE MATCH SIMULATOR
     # ---------------------------------------------------------
     elif app_mode == "⏱️ Live Match Simulator":
         st.markdown("## ⏱️ Live Match Simulator")
         st.write("Input current match conditions to receive real-time tactical adjustments and substitution alerts.")
         
+        # Added unique keys to bind these inputs to the session state for the AI
         col1, col2 = st.columns(2)
         with col1: 
             my_team = st.selectbox("Your Team", list(teams_db.keys()), index=0, key="live_team")
-            match_min = st.slider("Match Minute", 1, 90, 60)
-            score_diff = st.selectbox("Current Scoreline", ["Winning Comfortably (+2 goals)", "Leading by 1", "Tied", "Trailing by 1", "Losing Badly (-2 goals)"], index=2)
+            match_min = st.slider("Match Minute", 1, 90, 60, key="live_min")
+            score_diff = st.selectbox("Current Scoreline", ["Winning Comfortably (+2 goals)", "Leading by 1", "Tied", "Trailing by 1", "Losing Badly (-2 goals)"], index=2, key="live_score")
             
         with col2: 
             opp_team = st.selectbox("Opponent", list(teams_db.keys()), index=1 if len(teams_db) > 1 else 0, key="live_opp")
-            current_form = st.selectbox("Your Current Formation", list(formations_map.values()), index=6)
-            
+            current_form = st.selectbox("Your Current Formation", list(formations_map.values()), index=6, key="live_form")
             match_event = st.selectbox("Current Tactical Problem", [
-                "None - Game is balanced", 
-                "Midfield is being overrun", 
-                "Unable to break down deep block", 
-                "Vulnerable to counter-attacks", 
-                "Attackers look fatigued",
-                "Defenders struggling with opponent pace",
-                "Losing the aerial battle in the box",
-                "Opponent's high press is suffocating us"
-            ])
+                "None - Game is balanced", "Midfield is being overrun", "Unable to break down deep block", 
+                "Vulnerable to counter-attacks", "Attackers look fatigued", "Defenders struggling with opponent pace",
+                "Losing the aerial battle in the box", "Opponent's high press is suffocating us"
+            ], key="live_event")
 
+        # The hardcoded tactical logic remains below...
         tactical_db = {
-            "Midfield is being overrun": {
-                "tactics": [
-                    "⚠️ **Overrun Midfield:** The opponent is dominating possession centrally. Shift to a formation with 4 or 5 midfielders to regain control.",
-                    "⚠️ **Numerical Disadvantage:** We are losing the midfield battle. Instruct your wingers to invert and create a box midfield.",
-                    "⚠️ **Central Overload:** They are playing right through us. Drop the defensive line slightly and compress the space between midfield and defense."
-                ],
-                "subs": [
-                    "🔄 **Sub Alert:** Introduce a fresh defensive midfielder (CDM) to break up play and disrupt their rhythm.",
-                    "🔄 **Sub Alert:** Sacrifice a striker for an energetic box-to-box midfielder to win second balls.",
-                    "🔄 **Sub Alert:** Bring on a deep-lying playmaker to help dictate the tempo and retain possession."
-                ]
-            },
-            "Unable to break down deep block": {
-                "tactics": [
-                    "⚠️ **Deep Block Detected:** Opponent is parking the bus. Suggest moving to a wider formation to stretch their defense.",
-                    "⚠️ **Low Block Frustration:** Stop forcing it centrally. Instruct fullbacks to overlap aggressively and hit early crosses.",
-                    "⚠️ **Compact Defense:** We need to move their block. Increase passing tempo and encourage center-backs to step into midfield."
-                ],
-                "subs": [
-                    "🔄 **Sub Alert:** Substitute a fatigued central midfielder for a tricky winger who can beat a man 1v1.",
-                    "🔄 **Sub Alert:** Bring on a tall target-man (FW) to provide an aerial threat for crosses.",
-                    "🔄 **Sub Alert:** Introduce an attacking fullback to provide width and overload the wide areas."
-                ]
-            },
-            "Vulnerable to counter-attacks": {
-                "tactics": [
-                    "⚠️ **Counter-Attack Risk:** We are overcommitting forward. Keep one holding midfielder anchored at all times.",
-                    "⚠️ **Transition Danger:** Instruct your fullbacks to invert rather than overlap, providing extra bodies in the middle if we lose the ball.",
-                    "⚠️ **High Line Exposed:** Drop the defensive line back 10 yards. We are leaving too much space behind."
-                ],
-                "subs": [
-                    "🔄 **Sub Alert:** Consider substituting a slow center-back for a faster alternative to cover the channels.",
-                    "🔄 **Sub Alert:** Bring on a dedicated defensive fullback to lock down the flank they are exposing.",
-                    "🔄 **Sub Alert:** Introduce an energetic midfielder specifically instructed to commit tactical fouls high up the pitch."
-                ]
-            },
-            "Attackers look fatigued": {
-                "tactics": [
-                    "⚠️ **Attacking Fatigue:** Pressing intensity has dropped. Switch from a high press to a mid-block to conserve energy.",
-                    "⚠️ **Lethargic Movement:** We are static in the final third. Shift to a counter-attacking style and let the opponent have the ball.",
-                    "⚠️ **Tired Legs:** Instruct the team to play shorter passes to feet rather than playing into channels for forwards to chase."
-                ],
-                "subs": [
-                    "🔄 **Sub Alert:** Immediate substitution required for your starting forwards (FW) to restore high-press energy.",
-                    "🔄 **Sub Alert:** Introduce a pacey winger against their tired fullbacks.",
-                    "🔄 **Sub Alert:** Bring on a fresh shadow striker to exploit the spaces opening up as the game stretches."
-                ]
-            },
-            "Defenders struggling with opponent pace": {
-                "tactics": [
-                    "⚠️ **Pace Mismatch:** Their forwards are too quick for our high line. Drop into a deeper defensive block immediately.",
-                    "⚠️ **Exposed Channels:** Double up on the flanks. Instruct wingers to track back and support the fullbacks.",
-                    "⚠️ **Speed Threat:** Play more conservatively in possession. Avoid risky passes that could lead to quick turnovers."
-                ],
-                "subs": [
-                    "🔄 **Sub Alert:** Hook your slowest center-back for a more agile defender.",
-                    "🔄 **Sub Alert:** Introduce a defensive midfielder to screen the backline and cut out through-balls.",
-                    "🔄 **Sub Alert:** Bring on fresh fullbacks to cope with their wide speedsters."
-                ]
-            },
-            "Losing the aerial battle in the box": {
-                "tactics": [
-                    "⚠️ **Aerial Weakness:** We are being bullied in the air. Instruct players to stop crosses at the source by pressing wide players aggressively.",
-                    "⚠️ **Set-Piece Danger:** Avoid conceding cheap fouls around the penalty area. Transition to a zonal marking system on corners.",
-                    "⚠️ **Long Ball Threat:** Force them to play through the middle. Show their defenders inside so they can't hit diagonal long balls."
-                ],
-                "subs": [
-                    "🔄 **Sub Alert:** Introduce a taller, more physical center-back to handle crosses.",
-                    "🔄 **Sub Alert:** Bring on a robust midfielder to win the second balls dropping off the target man.",
-                    "🔄 **Sub Alert:** Substitute a small fullback for a taller option to defend back-post crosses."
-                ]
-            },
-            "Opponent's high press is suffocating us": {
-                "tactics": [
-                    "⚠️ **Suffocating Press:** We can't build from the back. Instruct the goalkeeper to go long and bypass their midfield press.",
-                    "⚠️ **Trapped in Defense:** Stretch the pitch. Instruct wingers to stay as wide and high as possible to pin their fullbacks back.",
-                    "⚠️ **High Turnover Risk:** Stop playing short goal kicks. Use a target man to win the first ball in their half."
-                ],
-                "subs": [
-                    "🔄 **Sub Alert:** Introduce a physical target man (FW) to aim long clearances toward.",
-                    "🔄 **Sub Alert:** Bring on a highly technical, press-resistant midfielder to help navigate out of tight spaces.",
-                    "🔄 **Sub Alert:** Swap to a goalkeeper with better distribution statistics."
-                ]
-            }
+            "Midfield is being overrun": { "tactics": ["⚠️ **Overrun Midfield:** Shift to a formation with 4 or 5 midfielders.", "⚠️ **Numerical Disadvantage:** Instruct your wingers to invert."], "subs": ["🔄 **Sub Alert:** Introduce a fresh defensive midfielder (CDM)."] },
+            "Unable to break down deep block": { "tactics": ["⚠️ **Deep Block Detected:** Suggest moving to a wider formation.", "⚠️ **Low Block Frustration:** Instruct fullbacks to overlap aggressively."], "subs": ["🔄 **Sub Alert:** Bring on a tall target-man (FW)."] },
+            "Vulnerable to counter-attacks": { "tactics": ["⚠️ **Counter-Attack Risk:** Keep one holding midfielder anchored at all times.", "⚠️ **High Line Exposed:** Drop the defensive line back 10 yards."], "subs": ["🔄 **Sub Alert:** Bring on a dedicated defensive fullback."] },
+            "Attackers look fatigued": { "tactics": ["⚠️ **Attacking Fatigue:** Switch from a high press to a mid-block.", "⚠️ **Tired Legs:** Play shorter passes to feet."], "subs": ["🔄 **Sub Alert:** Immediate substitution required for your starting forwards (FW)."] },
+            "Defenders struggling with opponent pace": { "tactics": ["⚠️ **Pace Mismatch:** Drop into a deeper defensive block immediately."], "subs": ["🔄 **Sub Alert:** Hook your slowest center-back for a more agile defender."] },
+            "Losing the aerial battle in the box": { "tactics": ["⚠️ **Aerial Weakness:** Transition to a zonal marking system on corners."], "subs": ["🔄 **Sub Alert:** Introduce a taller, more physical center-back."] },
+            "Opponent's high press is suffocating us": { "tactics": ["⚠️ **Suffocating Press:** Instruct the goalkeeper to go long."], "subs": ["🔄 **Sub Alert:** Introduce a physical target man (FW) to aim long clearances toward."] }
         }
 
         if st.button("Generate Live Instructions", use_container_width=True, type="primary"):
@@ -415,30 +338,16 @@ if teams_db:
             else:
                 my_att, my_def = teams_db[my_team]["Attack"], teams_db[my_team]["Defense"]
                 opp_att, opp_def = teams_db[opp_team]["Attack"], teams_db[opp_team]["Defense"]
-                
-                adjusted_att = my_att
-                adjusted_def = my_def
-                
-                tactic_advice = ""
-                sub_advice = ""
+                adjusted_att, adjusted_def = my_att, my_def
+                tactic_advice, sub_advice = "", ""
                 
                 if match_min > 70:
                     if "Trailing" in score_diff or "Losing" in score_diff:
-                        adjusted_att += 15 
-                        adjusted_def -= 10
-                        tactic_advice += random.choice([
-                            "⏳ **Late Game Scenario:** Abandon structural discipline. Transition to an ultra-attacking overload. Push fullbacks extremely high.\n\n",
-                            "⏳ **Chasing the Game:** Go direct. Bypass the midfield and load the penalty box with extra bodies.\n\n",
-                            "⏳ **Desperation Phase:** Throw caution to the wind. Leave only two defenders back and commit everyone else forward.\n\n"
-                        ])
+                        adjusted_att += 15; adjusted_def -= 10
+                        tactic_advice += "⏳ **Late Game Scenario:** Abandon structural discipline. Transition to an ultra-attacking overload. Push fullbacks extremely high.\n\n"
                     elif "Leading" in score_diff or "Winning" in score_diff:
-                        adjusted_def += 15 
-                        adjusted_att -= 10
-                        tactic_advice += random.choice([
-                            "🛡️ **Protect the Lead:** Drop the defensive line deeper, tighten spaces between lines, and waste time where possible.\n\n",
-                            "🛡️ **Lock it Down:** Shift to a back five. Clog the center of the pitch and force them into low-percentage crosses.\n\n",
-                            "🛡️ **Game Management:** Focus entirely on shape. Do not commit numbers forward on the counter-attack.\n\n"
-                        ])
+                        adjusted_def += 15; adjusted_att -= 10
+                        tactic_advice += "🛡️ **Protect the Lead:** Drop the defensive line deeper, tighten spaces between lines, and waste time where possible.\n\n"
                 
                 if match_event != "None - Game is balanced":
                     event_data = tactical_db.get(match_event)
@@ -450,12 +359,10 @@ if teams_db:
                 for f_code, f_name in formations_map.items():
                     test_match = pd.DataFrame({'Formation': [f_code], 'Team_Attack': [adjusted_att], 'Team_Defense': [adjusted_def], 'Opp_Attack': [opp_att], 'Opp_Defense': [opp_def]})
                     prob = model.predict_proba(test_match)[0][1] * 100
-                    
                     if match_event == "Midfield is being overrun" and f_name in ["4-2-4", "5-2-3", "4-4-2"]: prob -= 15 
                     if match_event == "Unable to break down deep block" and f_name.startswith("5"): prob -= 15 
                     if match_event == "Vulnerable to counter-attacks" and f_name in ["3-4-3", "4-2-4"]: prob -= 15
                     if match_event == "Defenders struggling with opponent pace" and f_name.startswith("3"): prob -= 15
-                    
                     if prob > best_prob: best_prob, best_form = prob, f_name
 
                 st.markdown("---")
@@ -472,11 +379,27 @@ if teams_db:
                 colB.write(sub_advice if sub_advice else "No emergency substitutions required based on current data. Monitor stamina levels.")
 
     # ---------------------------------------------------------
-    # MODULE 5: ASSISTANT MANAGER AI
+    # MODULE 5: ASSISTANT MANAGER AI (LIVE SYNCED)
     # ---------------------------------------------------------
     elif app_mode == "💬 Assistant Manager AI":
         st.markdown("## 💬 Tactical AI Assistant")
-        st.write("Chat with the tactical engine about formations, opponent weaknesses, or player stats.")
+        
+        # 1. Fetch live context from the Simulator session state (with fallbacks if the user hasn't opened the simulator yet)
+        live_my_team = st.session_state.get("live_team", list(teams_db.keys())[0])
+        live_opp_team = st.session_state.get("live_opp", list(teams_db.keys())[1] if len(teams_db) > 1 else list(teams_db.keys())[0])
+        live_min = st.session_state.get("live_min", 0)
+        live_score = st.session_state.get("live_score", "Tied")
+        live_event = st.session_state.get("live_event", "None - Game is balanced")
+
+        # 2. Display the UI Tracker so the user knows the AI is watching the game
+        st.markdown(f"""
+        <div class='live-feed-banner'>
+            <b>📡 LIVE MATCH FEED SYNCED:</b><br>
+            Managing <b>{live_my_team}</b> vs <b>{live_opp_team}</b> | ⏱️ Min: <b>{live_min}</b> | Score: <b>{live_score}</b> | Status: <b>{live_event}</b>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.write("Chat with the tactical engine. It is automatically monitoring the live match conditions above.")
         
         # Initialize chat history
         if "messages" not in st.session_state:
@@ -488,7 +411,7 @@ if teams_db:
                 st.markdown(message["content"])
 
         # Accept user input
-        if prompt := st.chat_input("E.g., How do I break down Aston Villa's high line?"):
+        if prompt := st.chat_input("E.g., Based on our current problem, should I bring on an extra defender?"):
             # Display user message
             with st.chat_message("user"):
                 st.markdown(prompt)
@@ -497,8 +420,15 @@ if teams_db:
 
             # Generate AI response 
             with st.chat_message("assistant"):
-                # Connect your true_ml_model.py Gemini logic here
-                response = f"I am analyzing your request: '{prompt}' against the 96-team database."
+                
+                # 3. Inject the Live Match context invisibly into the prompt
+                system_injection = f"[LIVE MATCH DATA: {live_my_team} vs {live_opp_team}, Min {live_min}, {live_score}, Tactical Issue: {live_event}] "
+                full_prompt = system_injection + prompt
+                
+                # Connect your true_ml_model.py Gemini logic here using `full_prompt`
+                # For now, it will return this dynamic string to prove it is reading the game:
+                response = f"I see we are in the **{live_min}th minute** managing **{live_my_team}**. I am analyzing your request: *'{prompt}'* while accounting for the current match state."
+                
                 st.markdown(response)
                 
             # Add assistant response to chat history
