@@ -136,8 +136,6 @@ module = st.sidebar.radio(
         "⏱️ Live Match Simulator",
         "💬 Assistant Manager AI"
     )
-)
-    ])
 
     # ---------------------------------------------------------
     # MODULE 1: PRE-MATCH AUTO-TACTICS
