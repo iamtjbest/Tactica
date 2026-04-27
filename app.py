@@ -391,62 +391,70 @@ if teams_db:
             ai_opp_team = st.selectbox("Opponent", list(teams_db.keys()), index=1 if len(teams_db) > 1 else 0, key="ai_opp_team")
             
         st.markdown("---")
-        
-        # Initialize Gemini Setup safely
-        gemini_ready = False
-        try:
-            if "GEMINI_API_KEY" in st.secrets:
-                genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-                model_ai = genai.GenerativeModel('gemini-1.5-flash')
-                gemini_ready = True
-            else:
-                st.warning("⚠️ GEMINI_API_KEY not found in Streamlit Secrets. The AI is offline.")
-        except Exception as e:
-            st.error(f"Failed to load AI: {e}")
-        
-        # Initialize chat history
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
 
-        # Display chat messages from history
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+        # The explicit "Sync" button requirement
+        if st.button("📡 Sync Live Match Data", use_container_width=True, type="primary"):
+            st.session_state.ai_synced = True
+            st.success(f"✅ Live tactical data for {ai_my_team} and {ai_opp_team} successfully synced to the AI Engine! You may now brief the Assistant Manager.")
 
-        # Accept user input
-        if prompt := st.chat_input(f"E.g., How do I set up {ai_my_team} to counter {ai_opp_team}?"):
-            # Display user message
-            with st.chat_message("user"):
-                st.markdown(prompt)
-            # Add user message to chat history
-            st.session_state.messages.append({"role": "user", "content": prompt})
-
-            # Generate AI response 
-            with st.chat_message("assistant"):
-                if gemini_ready:
-                    # Pull real data from your databases to feed the AI context
-                    my_att = teams_db.get(ai_my_team, {}).get("Attack", 80)
-                    my_def = teams_db.get(ai_my_team, {}).get("Defense", 80)
-                    opp_att = teams_db.get(ai_opp_team, {}).get("Attack", 80)
-                    opp_def = teams_db.get(ai_opp_team, {}).get("Defense", 80)
-                    
-                    # Create the invisible system prompt framing the match state
-                    system_prompt = f"""
-                    You are an elite football tactical Assistant Manager. Provide direct, tactical advice. 
-                    We are managing {ai_my_team} (Attack Rating: {my_att}, Defense Rating: {my_def}).
-                    We are playing against {ai_opp_team} (Attack Rating: {opp_att}, Defense Rating: {opp_def}).
-                    The Manager asks: "{prompt}"
-                    """
-                    
-                    try:
-                        response = model_ai.generate_content(system_prompt)
-                        ai_reply = response.text
-                        st.markdown(ai_reply)
-                        st.session_state.messages.append({"role": "assistant", "content": ai_reply})
-                    except Exception as e:
-                        st.error(f"Error communicating with Gemini: {e}")
+        # The chat interface ONLY opens after the button is pressed
+        if st.session_state.get("ai_synced", False):
+            # Initialize Gemini Setup safely
+            gemini_ready = False
+            try:
+                if "GEMINI_API_KEY" in st.secrets:
+                    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                    # Changed from gemini-1.5-flash to the ultra-stable gemini-pro
+                    model_ai = genai.GenerativeModel('gemini-pro')
+                    gemini_ready = True
                 else:
-                    st.error("The Gemini Engine is offline. Please check your API keys.")
+                    st.warning("⚠️ GEMINI_API_KEY not found in Streamlit Secrets. The AI is offline.")
+            except Exception as e:
+                st.error(f"Failed to load AI: {e}")
+            
+            # Initialize chat history
+            if "messages" not in st.session_state:
+                st.session_state.messages = []
+
+            # Display chat messages from history
+            for message in st.session_state.messages:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
+            # Accept user input
+            if prompt := st.chat_input(f"E.g., How do I set up {ai_my_team} to counter {ai_opp_team}?"):
+                # Display user message
+                with st.chat_message("user"):
+                    st.markdown(prompt)
+                # Add user message to chat history
+                st.session_state.messages.append({"role": "user", "content": prompt})
+
+                # Generate AI response 
+                with st.chat_message("assistant"):
+                    if gemini_ready:
+                        # Pull real data from your databases to feed the AI context
+                        my_att = teams_db.get(ai_my_team, {}).get("Attack", 80)
+                        my_def = teams_db.get(ai_my_team, {}).get("Defense", 80)
+                        opp_att = teams_db.get(ai_opp_team, {}).get("Attack", 80)
+                        opp_def = teams_db.get(ai_opp_team, {}).get("Defense", 80)
+                        
+                        # Create the invisible system prompt framing the match state
+                        system_prompt = f"""
+                        You are an elite football tactical Assistant Manager. Provide direct, tactical advice. 
+                        We are managing {ai_my_team} (Attack Rating: {my_att}, Defense Rating: {my_def}).
+                        We are playing against {ai_opp_team} (Attack Rating: {opp_att}, Defense Rating: {opp_def}).
+                        The Manager asks: "{prompt}"
+                        """
+                        
+                        try:
+                            response = model_ai.generate_content(system_prompt)
+                            ai_reply = response.text
+                            st.markdown(ai_reply)
+                            st.session_state.messages.append({"role": "assistant", "content": ai_reply})
+                        except Exception as e:
+                            st.error(f"Error communicating with Gemini: {e}")
+                    else:
+                        st.error("The Gemini Engine is offline. Please check your API keys.")
 
 else:
     st.warning("No teams loaded. Please check your teams.json file.")
