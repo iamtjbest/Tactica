@@ -126,12 +126,17 @@ def select_starting_xi(team_name, formation):
 
 # --- 4. SIDEBAR NAVIGATION & UI ---
 if teams_db:
-    st.sidebar.title("Navigation")
-    app_mode = st.sidebar.radio("Select Module:", [
-        "🤖 Pre-Match Auto-Tactics", 
+    st.sidebar.markdown("### NAVIGATION")
+module = st.sidebar.radio(
+    "Select Module:",
+    (
+        "⚽ Pre-Match Auto-Tactics", 
         "📊 Pre-Match Opponent Analysis", 
         "🧠 Coach's Sandbox", 
-        "⏱️ Live Match Simulator"
+        "⏱️ Live Match Simulator",
+        "💬 Assistant Manager AI"
+    )
+)
     ])
 
     # ---------------------------------------------------------
@@ -477,5 +482,6 @@ if teams_db:
                 
                 colB.markdown("### 🔄 Substitution Protocol")
                 colB.write(sub_advice if sub_advice else "No emergency substitutions required based on current data. Monitor stamina levels.")
+                
 else:
     st.warning("No teams loaded. Please check your teams.json file.")
