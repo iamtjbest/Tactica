@@ -5,6 +5,7 @@ import json
 import re
 import difflib
 import random
+import google.generativeai as genai
 from sklearn.ensemble import RandomForestClassifier
 
 st.set_page_config(page_title="Tactical AI", page_icon="⚽", layout="wide")
@@ -18,7 +19,6 @@ div[data-testid="metric-container"] { background: rgba(0, 0, 0, 0.6); padding: 1
 .stat-text { color: #8ca892; font-size: 14px; }
 .live-alert { background: rgba(220, 38, 38, 0.2); border-left: 4px solid #dc2626; padding: 15px; border-radius: 5px; color: #f87171; margin-bottom: 15px; }
 .live-suggestion { background: rgba(34, 197, 94, 0.2); border-left: 4px solid #22c55e; padding: 15px; border-radius: 5px; color: #86efac; margin-bottom: 15px; }
-.live-feed-banner { background: rgba(0, 229, 255, 0.1); border-left: 4px solid #00E5FF; padding: 10px 15px; border-radius: 5px; color: #E2E8F0; margin-bottom: 20px; font-size: 14px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -305,23 +305,21 @@ if teams_db:
         st.markdown("## ⏱️ Live Match Simulator")
         st.write("Input current match conditions to receive real-time tactical adjustments and substitution alerts.")
         
-        # Added unique keys to bind these inputs to the session state for the AI
         col1, col2 = st.columns(2)
         with col1: 
-            my_team = st.selectbox("Your Team", list(teams_db.keys()), index=0, key="live_team")
-            match_min = st.slider("Match Minute", 1, 90, 60, key="live_min")
-            score_diff = st.selectbox("Current Scoreline", ["Winning Comfortably (+2 goals)", "Leading by 1", "Tied", "Trailing by 1", "Losing Badly (-2 goals)"], index=2, key="live_score")
+            my_team = st.selectbox("Your Team", list(teams_db.keys()), index=0, key="sim_team")
+            match_min = st.slider("Match Minute", 1, 90, 60)
+            score_diff = st.selectbox("Current Scoreline", ["Winning Comfortably (+2 goals)", "Leading by 1", "Tied", "Trailing by 1", "Losing Badly (-2 goals)"], index=2)
             
         with col2: 
-            opp_team = st.selectbox("Opponent", list(teams_db.keys()), index=1 if len(teams_db) > 1 else 0, key="live_opp")
-            current_form = st.selectbox("Your Current Formation", list(formations_map.values()), index=6, key="live_form")
+            opp_team = st.selectbox("Opponent", list(teams_db.keys()), index=1 if len(teams_db) > 1 else 0, key="sim_opp")
+            current_form = st.selectbox("Your Current Formation", list(formations_map.values()), index=6)
             match_event = st.selectbox("Current Tactical Problem", [
                 "None - Game is balanced", "Midfield is being overrun", "Unable to break down deep block", 
                 "Vulnerable to counter-attacks", "Attackers look fatigued", "Defenders struggling with opponent pace",
                 "Losing the aerial battle in the box", "Opponent's high press is suffocating us"
-            ], key="live_event")
+            ])
 
-        # The hardcoded tactical logic remains below...
         tactical_db = {
             "Midfield is being overrun": { "tactics": ["⚠️ **Overrun Midfield:** Shift to a formation with 4 or 5 midfielders.", "⚠️ **Numerical Disadvantage:** Instruct your wingers to invert."], "subs": ["🔄 **Sub Alert:** Introduce a fresh defensive midfielder (CDM)."] },
             "Unable to break down deep block": { "tactics": ["⚠️ **Deep Block Detected:** Suggest moving to a wider formation.", "⚠️ **Low Block Frustration:** Instruct fullbacks to overlap aggressively."], "subs": ["🔄 **Sub Alert:** Bring on a tall target-man (FW)."] },
@@ -379,27 +377,32 @@ if teams_db:
                 colB.write(sub_advice if sub_advice else "No emergency substitutions required based on current data. Monitor stamina levels.")
 
     # ---------------------------------------------------------
-    # MODULE 5: ASSISTANT MANAGER AI (LIVE SYNCED)
+    # MODULE 5: ASSISTANT MANAGER AI (GEMINI ENGINE)
     # ---------------------------------------------------------
     elif app_mode == "💬 Assistant Manager AI":
         st.markdown("## 💬 Tactical AI Assistant")
+        st.write("Select your matchup. The AI will draw the latest stats from the database to generate customized advice.")
         
-        # 1. Fetch live context from the Simulator session state (with fallbacks if the user hasn't opened the simulator yet)
-        live_my_team = st.session_state.get("live_team", list(teams_db.keys())[0])
-        live_opp_team = st.session_state.get("live_opp", list(teams_db.keys())[1] if len(teams_db) > 1 else list(teams_db.keys())[0])
-        live_min = st.session_state.get("live_min", 0)
-        live_score = st.session_state.get("live_score", "Tied")
-        live_event = st.session_state.get("live_event", "None - Game is balanced")
-
-        # 2. Display the UI Tracker so the user knows the AI is watching the game
-        st.markdown(f"""
-        <div class='live-feed-banner'>
-            <b>📡 LIVE MATCH FEED SYNCED:</b><br>
-            Managing <b>{live_my_team}</b> vs <b>{live_opp_team}</b> | ⏱️ Min: <b>{live_min}</b> | Score: <b>{live_score}</b> | Status: <b>{live_event}</b>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.write("Chat with the tactical engine. It is automatically monitoring the live match conditions above.")
+        # Dedicated matchup selectors for the AI chat
+        col1, col2 = st.columns(2)
+        with col1: 
+            ai_my_team = st.selectbox("Your Team (AI Focus)", list(teams_db.keys()), index=0, key="ai_my_team")
+        with col2: 
+            ai_opp_team = st.selectbox("Opponent", list(teams_db.keys()), index=1 if len(teams_db) > 1 else 0, key="ai_opp_team")
+            
+        st.markdown("---")
+        
+        # Initialize Gemini Setup safely
+        gemini_ready = False
+        try:
+            if "GEMINI_API_KEY" in st.secrets:
+                genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+                model_ai = genai.GenerativeModel('gemini-1.5-flash')
+                gemini_ready = True
+            else:
+                st.warning("⚠️ GEMINI_API_KEY not found in Streamlit Secrets. The AI is offline.")
+        except Exception as e:
+            st.error(f"Failed to load AI: {e}")
         
         # Initialize chat history
         if "messages" not in st.session_state:
@@ -411,7 +414,7 @@ if teams_db:
                 st.markdown(message["content"])
 
         # Accept user input
-        if prompt := st.chat_input("E.g., Based on our current problem, should I bring on an extra defender?"):
+        if prompt := st.chat_input(f"E.g., How do I set up {ai_my_team} to counter {ai_opp_team}?"):
             # Display user message
             with st.chat_message("user"):
                 st.markdown(prompt)
@@ -420,19 +423,30 @@ if teams_db:
 
             # Generate AI response 
             with st.chat_message("assistant"):
-                
-                # 3. Inject the Live Match context invisibly into the prompt
-                system_injection = f"[LIVE MATCH DATA: {live_my_team} vs {live_opp_team}, Min {live_min}, {live_score}, Tactical Issue: {live_event}] "
-                full_prompt = system_injection + prompt
-                
-                # Connect your true_ml_model.py Gemini logic here using `full_prompt`
-                # For now, it will return this dynamic string to prove it is reading the game:
-                response = f"I see we are in the **{live_min}th minute** managing **{live_my_team}**. I am analyzing your request: *'{prompt}'* while accounting for the current match state."
-                
-                st.markdown(response)
-                
-            # Add assistant response to chat history
-            st.session_state.messages.append({"role": "assistant", "content": response})
+                if gemini_ready:
+                    # Pull real data from your databases to feed the AI context
+                    my_att = teams_db.get(ai_my_team, {}).get("Attack", 80)
+                    my_def = teams_db.get(ai_my_team, {}).get("Defense", 80)
+                    opp_att = teams_db.get(ai_opp_team, {}).get("Attack", 80)
+                    opp_def = teams_db.get(ai_opp_team, {}).get("Defense", 80)
+                    
+                    # Create the invisible system prompt framing the match state
+                    system_prompt = f"""
+                    You are an elite football tactical Assistant Manager. Provide direct, tactical advice. 
+                    We are managing {ai_my_team} (Attack Rating: {my_att}, Defense Rating: {my_def}).
+                    We are playing against {ai_opp_team} (Attack Rating: {opp_att}, Defense Rating: {opp_def}).
+                    The Manager asks: "{prompt}"
+                    """
+                    
+                    try:
+                        response = model_ai.generate_content(system_prompt)
+                        ai_reply = response.text
+                        st.markdown(ai_reply)
+                        st.session_state.messages.append({"role": "assistant", "content": ai_reply})
+                    except Exception as e:
+                        st.error(f"Error communicating with Gemini: {e}")
+                else:
+                    st.error("The Gemini Engine is offline. Please check your API keys.")
 
 else:
     st.warning("No teams loaded. Please check your teams.json file.")
