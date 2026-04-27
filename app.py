@@ -481,5 +481,37 @@ module = st.sidebar.radio(
                 colB.markdown("### 🔄 Substitution Protocol")
                 colB.write(sub_advice if sub_advice else "No emergency substitutions required based on current data. Monitor stamina levels.")
                 
+                # ---------------------------------------------------------
+                # MODULE 5: ASSISTANT MANAGER AI
+                # ---------------------------------------------------------
+    elif app_mode == "💬 Assistant Manager AI":
+        st.markdown("## 💬 Tactical AI Assistant")
+        st.write("Chat with the tactical engine about formations, opponent weaknesses, or player stats.")
+        
+        # Initialize chat history
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+
+        # Display chat messages from history
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        # Accept user input
+        if prompt := st.chat_input("E.g., How do I break down Aston Villa's high line?"):
+            # Display user message
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            # Add user message to chat history
+            st.session_state.messages.append({"role": "user", "content": prompt})
+
+            # Generate AI response (Connect this to your Gemini logic)
+            with st.chat_message("assistant"):
+                response = "I am processing your tactical request against the current 96-team database..."
+                st.markdown(response)
+                
+            # Add assistant response to chat history
+            st.session_state.messages.append({"role": "assistant", "content": response})
+                
 else:
     st.warning("No teams loaded. Please check your teams.json file.")
