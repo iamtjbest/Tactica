@@ -4,14 +4,14 @@ import numpy as np
 import json
 import re
 import difflib
-import random # NEW: Added for dynamic response generation
+import random
 from sklearn.ensemble import RandomForestClassifier
 
 st.set_page_config(page_title="Tactical AI", page_icon="⚽", layout="wide")
 
 st.markdown("""
 <style>
-.stApp { background-color: #0b210e; background-image: gradient(0deg, #0b210e, #0b210e 60px, #0f2b13 60px, #0f2b13 120px); }
+.stApp { background-color: #0b210e; background-image: linear-gradient(0deg, #0b210e, #0b210e 60px, #0f2b13 60px, #0f2b13 120px); }
 h1 { color: #22c55e !important; text-shadow: 0px 0px 10px rgba(34, 197, 94, 0.4); text-transform: uppercase; }
 div[data-testid="metric-container"] { background: rgba(0, 0, 0, 0.6); padding: 15px; border-radius: 8px; border-left: 3px solid #22c55e; }
 .player-card { background: rgba(0, 0, 0, 0.7); border: 1px solid #22c55e; border-radius: 5px; padding: 10px; margin-bottom: 5px; color: white; display: flex; justify-content: space-between;}
@@ -80,7 +80,6 @@ except Exception as e:
     st.error(f"🚨 JSON ERROR: Your players.json file is broken! Details: {e}")
     players_db = {}
 
-
 # --- 3. ADVANCED PLAYER SELECTION ALGORITHM ---
 def select_starting_xi(team_name, formation):
     if team_name not in players_db:
@@ -126,17 +125,14 @@ def select_starting_xi(team_name, formation):
 
 # --- 4. SIDEBAR NAVIGATION & UI ---
 if teams_db:
-    st.sidebar.markdown("### NAVIGATION")
-module = st.sidebar.radio(
-    "Select Module:",
-    (
-        "⚽ Pre-Match Auto-Tactics", 
+    st.sidebar.title("Navigation")
+    app_mode = st.sidebar.radio("Select Module:", [
+        "🤖 Pre-Match Auto-Tactics", 
         "📊 Pre-Match Opponent Analysis", 
         "🧠 Coach's Sandbox", 
         "⏱️ Live Match Simulator",
         "💬 Assistant Manager AI"
-    )
-)
+    ])
 
     # ---------------------------------------------------------
     # MODULE 1: PRE-MATCH AUTO-TACTICS
@@ -315,7 +311,6 @@ module = st.sidebar.radio(
             opp_team = st.selectbox("Opponent", list(teams_db.keys()), index=1 if len(teams_db) > 1 else 0, key="live_opp")
             current_form = st.selectbox("Your Current Formation", list(formations_map.values()), index=6)
             
-            # EXPANDED TACTICAL PROBLEMS
             match_event = st.selectbox("Current Tactical Problem", [
                 "None - Game is balanced", 
                 "Midfield is being overrun", 
@@ -327,7 +322,6 @@ module = st.sidebar.radio(
                 "Opponent's high press is suffocating us"
             ])
 
-        # --- THE DYNAMIC TACTICAL DATABASE ---
         tactical_db = {
             "Midfield is being overrun": {
                 "tactics": [
@@ -425,11 +419,9 @@ module = st.sidebar.radio(
                 adjusted_att = my_att
                 adjusted_def = my_def
                 
-                # Dynamic Logic Selection
                 tactic_advice = ""
                 sub_advice = ""
                 
-                # 1. Time & Scoreline Logic (Randomized variations)
                 if match_min > 70:
                     if "Trailing" in score_diff or "Losing" in score_diff:
                         adjusted_att += 15 
@@ -448,20 +440,17 @@ module = st.sidebar.radio(
                             "🛡️ **Game Management:** Focus entirely on shape. Do not commit numbers forward on the counter-attack.\n\n"
                         ])
                 
-                # 2. Match Event Logic (Pulls from Database)
                 if match_event != "None - Game is balanced":
                     event_data = tactical_db.get(match_event)
                     if event_data:
                         tactic_advice += random.choice(event_data["tactics"])
                         sub_advice = random.choice(event_data["subs"])
 
-                # Recalculate best formation with adjusted stats
                 best_prob, best_form = 0, ""
                 for f_code, f_name in formations_map.items():
                     test_match = pd.DataFrame({'Formation': [f_code], 'Team_Attack': [adjusted_att], 'Team_Defense': [adjusted_def], 'Opp_Attack': [opp_att], 'Opp_Defense': [opp_def]})
                     prob = model.predict_proba(test_match)[0][1] * 100
                     
-                    # AI Penalties for bad formation matchups based on the specific problem
                     if match_event == "Midfield is being overrun" and f_name in ["4-2-4", "5-2-3", "4-4-2"]: prob -= 15 
                     if match_event == "Unable to break down deep block" and f_name.startswith("5"): prob -= 15 
                     if match_event == "Vulnerable to counter-attacks" and f_name in ["3-4-3", "4-2-4"]: prob -= 15
@@ -481,10 +470,10 @@ module = st.sidebar.radio(
                 
                 colB.markdown("### 🔄 Substitution Protocol")
                 colB.write(sub_advice if sub_advice else "No emergency substitutions required based on current data. Monitor stamina levels.")
-                
-                # ---------------------------------------------------------
-                # MODULE 5: ASSISTANT MANAGER AI
-                # ---------------------------------------------------------
+
+    # ---------------------------------------------------------
+    # MODULE 5: ASSISTANT MANAGER AI
+    # ---------------------------------------------------------
     elif app_mode == "💬 Assistant Manager AI":
         st.markdown("## 💬 Tactical AI Assistant")
         st.write("Chat with the tactical engine about formations, opponent weaknesses, or player stats.")
@@ -506,13 +495,14 @@ module = st.sidebar.radio(
             # Add user message to chat history
             st.session_state.messages.append({"role": "user", "content": prompt})
 
-            # Generate AI response (Connect this to your Gemini logic)
+            # Generate AI response 
             with st.chat_message("assistant"):
-                response = "I am processing your tactical request against the current 96-team database..."
+                # Connect your true_ml_model.py Gemini logic here
+                response = f"I am analyzing your request: '{prompt}' against the 96-team database."
                 st.markdown(response)
                 
             # Add assistant response to chat history
             st.session_state.messages.append({"role": "assistant", "content": response})
-                
+
 else:
     st.warning("No teams loaded. Please check your teams.json file.")
