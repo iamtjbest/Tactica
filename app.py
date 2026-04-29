@@ -479,7 +479,7 @@ if teams_db:
     # ---------------------------------------------------------
     # MODULE 5: ASSISTANT MANAGER AI (GEMINI ENGINE)
     # ---------------------------------------------------------
-    elif app_mode == "💬 Assistant Manager AI":
+    elif app_mode == "💬 Assistant Manager Chat":  # <--- CHANGED "AI" TO "Chat"
         st.markdown("## 💬 Tactical AI Assistant")
         st.write("Select your matchup. The AI will draw the latest stats from the database to generate customized advice.")
         
