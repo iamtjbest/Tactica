@@ -3,11 +3,11 @@ import pandas as pd
 import numpy as np
 import json
 import re
-import joblib
-import google.generativeai as genai
-import os
 import difflib
-import random # NEW: Added for dynamic response generation
+import random
+import google.generativeai as genai
+import requests  # <--- THIS IS THE MISSING PIECE
+from datetime import datetime  # <--- AND THIS ONE
 from sklearn.ensemble import RandomForestClassifier
 
 # Fetch the API key from Streamlit secrets
