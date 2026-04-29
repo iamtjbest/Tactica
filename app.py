@@ -501,38 +501,63 @@ if teams_db:
                 with st.spinner(f"Scanning global databases for {ai_my_team}'s fixture today..."):
                     headers = {'x-apisports-key': api_sports_key}
                     
-                    # 1. Search for the Team ID dynamically
-                    search_url = f"https://v3.football.api-sports.io/teams?search={ai_my_team}"
-                    search_res = requests.get(search_url, headers=headers).json()
+                    # 1. Map known teams directly to save API calls and prevent search errors
+                    known_teams = {
+                        "Arsenal": 42,
+                        "Atlético Madrid": 530,
+                        "Aston Villa": 66,
+                        "Real Madrid": 541,
+                        "Manchester Utd": 33,
+                        "Chelsea": 49,
+                        "Liverpool": 40,
+                        "Manchester City": 47
+                        # Add any other teams from your teams.json here
+                    }
                     
-                    if not search_res.get('response'):
-                        st.error(f"Could not locate '{ai_my_team}' in the global API database.")
-                    else:
-                        team_id = search_res['response'][0]['team']['id']
+                    team_id = known_teams.get(ai_my_team)
+                    
+                    # If the team isn't in our hardcoded list, try the API search
+                    if not team_id:
+                        search_url = f"https://v3.football.api-sports.io/teams?search={ai_my_team}"
+                        search_res = requests.get(search_url, headers=headers).json()
                         
-                        # 2. Fetch ANY fixture for this team for today (Bypassing League Filters)
-                        today_str = datetime.now().strftime('%Y-%m-%d')
-                        fix_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&date={today_str}"
-                        fix_res = requests.get(fix_url, headers=headers).json()
-                        
-                        if not fix_res.get('response'):
-                            st.warning(f"⚠️ {ai_my_team} does not have a professional fixture scheduled for today ({today_str}).")
+                        # Catch exact API errors (like rate limits)
+                        if search_res.get('errors'):
+                            st.error(f"API Error: {search_res['errors']}")
+                            st.stop()
+                            
+                        if not search_res.get('response'):
+                            st.error(f"Could not locate '{ai_my_team}' in the global API database.")
+                            st.stop()
                         else:
-                            # 3. Extract the exact match context
-                            fixture_data = fix_res['response'][0]
-                            status = fixture_data['fixture']['status']['short']
-                            elapsed = fixture_data['fixture']['status']['elapsed']
-                            home_team = fixture_data['teams']['home']['name']
-                            away_team = fixture_data['teams']['away']['name']
-                            goals_home = fixture_data['goals']['home'] if fixture_data['goals']['home'] is not None else 0
-                            goals_away = fixture_data['goals']['away'] if fixture_data['goals']['away'] is not None else 0
+                            team_id = search_res['response'][0]['team']['id']
                             
-                            match_context = f"{home_team} {goals_home} - {goals_away} {away_team} | Min: {elapsed}' | Status: {status}"
-                            
-                            # Lock the data into the session state to open the chat
-                            st.session_state.ai_synced = True
-                            st.session_state.live_match_context = match_context
-                            st.success(f"✅ Data Synced! Live Feed: {match_context}")
+                    # 2. Fetch ANY fixture for this team for today
+                    today_str = datetime.now().strftime('%Y-%m-%d')
+                    fix_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&date={today_str}"
+                    fix_res = requests.get(fix_url, headers=headers).json()
+                    
+                    # Catch API errors on the fixture call
+                    if fix_res.get('errors'):
+                        st.error(f"API Error: {fix_res['errors']}")
+                    elif not fix_res.get('response'):
+                        st.warning(f"⚠️ {ai_my_team} does not have a professional fixture scheduled for today ({today_str}).")
+                    else:
+                        # 3. Extract the exact match context
+                        fixture_data = fix_res['response'][0]
+                        status = fixture_data['fixture']['status']['short']
+                        elapsed = fixture_data['fixture']['status']['elapsed']
+                        home_team = fixture_data['teams']['home']['name']
+                        away_team = fixture_data['teams']['away']['name']
+                        goals_home = fixture_data['goals']['home'] if fixture_data['goals']['home'] is not None else 0
+                        goals_away = fixture_data['goals']['away'] if fixture_data['goals']['away'] is not None else 0
+                        
+                        match_context = f"{home_team} {goals_home} - {goals_away} {away_team} | Min: {elapsed}' | Status: {status}"
+                        
+                        # Lock the data into the session state to open the chat
+                        st.session_state.ai_synced = True
+                        st.session_state.live_match_context = match_context
+                        st.success(f"✅ Data Synced! Live Feed: {match_context}")
 
         # --- THE CHAT INTERFACE ---
         if st.session_state.get("ai_synced", False):
