@@ -79,25 +79,51 @@ except Exception as e:
 
 
 # --- 3. ADVANCED PLAYER SELECTION ALGORITHM ---
+def get_primary_pos(pos_string):
+    """Return the primary position from a compound string like 'MF,FW' or 'FW,MF'."""
+    if not pos_string:
+        return "Unknown"
+    return pos_string.split(",")[0].strip()
+
 def select_starting_xi(team_name, formation):
+    """
+    Select the best 11 players for a given formation, strictly respecting
+    positional slots. Hybrid-position players (MF,FW) are only used for a
+    slot if their PRIMARY position matches. No more padding with wrong positions.
+    """
     if team_name not in players_db:
         close_matches = difflib.get_close_matches(team_name, players_db.keys(), n=1, cutoff=0.6)
         if close_matches:
             team_name = close_matches[0]
         else:
             return None
-    
+
     parts = [int(x) for x in re.findall(r'\d+', formation)]
-    def_count, att_count = parts[0], parts[-1]
-    mid_count = sum(parts[1:-1]) if len(parts) > 2 else parts[1]
+    def_count  = parts[0]
+    att_count  = parts[-1]
+    mid_count  = sum(parts[1:-1]) if len(parts) > 2 else parts[1]
 
     roster = players_db[team_name]
+    # Sort by minutes played first (form indicator), then G+A
     sorted_roster = sorted(roster, key=lambda x: (x['Min'], x['G_A']), reverse=True)
-    
-    starting_xi = []
+
+    starting_xi   = []
     drafted_names = set()
 
-    def draft_players(pos_keyword, count):
+    def draft_by_primary(primary_pos, count):
+        """Draft players whose FIRST listed position matches primary_pos."""
+        drafted = 0
+        for p in sorted_roster:
+            if drafted >= count:
+                break
+            if get_primary_pos(p['Pos']) == primary_pos and p['Name'] not in drafted_names:
+                starting_xi.append(p)
+                drafted_names.add(p['Name'])
+                drafted += 1
+        return drafted
+
+    def draft_by_any(pos_keyword, count):
+        """Fallback: match pos_keyword anywhere in the position string."""
         drafted = 0
         for p in sorted_roster:
             if drafted >= count:
@@ -106,19 +132,40 @@ def select_starting_xi(team_name, formation):
                 starting_xi.append(p)
                 drafted_names.add(p['Name'])
                 drafted += 1
+        return drafted
 
-    draft_players('GK', 1)
-    draft_players('DF', def_count)
-    draft_players('MF', mid_count)
-    draft_players('FW', att_count)
-    
-    for p in sorted_roster:
-        if len(starting_xi) >= 11:
-            break
-        if p['Name'] not in drafted_names:
-            starting_xi.append(p)
-            drafted_names.add(p['Name'])
-            
+    # 1. GK — strict primary match only
+    gk_drafted = draft_by_primary('GK', 1)
+    if gk_drafted < 1:
+        draft_by_any('GK', 1)
+
+    # 2. Defenders — primary DF first, fall back to any DF tag
+    df_drafted = draft_by_primary('DF', def_count)
+    if df_drafted < def_count:
+        draft_by_any('DF', def_count - df_drafted)
+
+    # 3. Midfielders — primary MF first, fall back to any MF tag
+    mf_drafted = draft_by_primary('MF', mid_count)
+    if mf_drafted < mid_count:
+        draft_by_any('MF', mid_count - mf_drafted)
+
+    # 4. Forwards — primary FW first, fall back to any FW tag
+    fw_drafted = draft_by_primary('FW', att_count)
+    if fw_drafted < att_count:
+        draft_by_any('FW', att_count - fw_drafted)
+
+    # 5. Safety net: if still short of 11 (rare data gap), fill with highest-minute
+    #    remaining players but mark them clearly so the UI can flag them
+    if len(starting_xi) < 11:
+        for p in sorted_roster:
+            if len(starting_xi) >= 11:
+                break
+            if p['Name'] not in drafted_names:
+                p = dict(p)          # don't mutate the original
+                p['fallback'] = True
+                starting_xi.append(p)
+                drafted_names.add(p['Name'])
+
     return starting_xi
 
 # --- 4. SIDEBAR NAVIGATION & UI ---
@@ -136,37 +183,300 @@ if teams_db:
     # MODULE 1: PRE-MATCH AUTO-TACTICS
     # ---------------------------------------------------------
     if app_mode == "🤖 Pre-Match Auto-Tactics":
-        st.markdown("## 🤖 Pre-Match Auto-Tactics")
-        st.write("Let the engine analyze the matchup and generate the optimal starting game plan.")
-        
-        col1, col2 = st.columns(2)
-        with col1: my_team = st.selectbox("Your Team", list(teams_db.keys()), index=0) 
-        with col2: opp_team = st.selectbox("Opponent", list(teams_db.keys()), index=1 if len(teams_db) > 1 else 0)
+        import requests as _req
+        import time as _time
 
-        if st.button("Generate Optimal Tactics", use_container_width=True, type="primary"):
+        st.markdown("## 🤖 Pre-Match Auto-Tactics")
+        st.write("Select your teams. The engine reads each team's last 5 matches, extracts real formations used, "
+                 "calculates attack/defence ratings from actual results, then recommends the optimal game plan.")
+
+        col1, col2 = st.columns(2)
+        with col1: my_team  = st.selectbox("Your Team", list(teams_db.keys()), index=0)
+        with col2: opp_team = st.selectbox("Opponent",  list(teams_db.keys()), index=1 if len(teams_db) > 1 else 0)
+
+        FORM_CACHE_FILE = "form_cache.json"
+        FORM_CACHE_TTL  = 86400  # 24 hours — only re-fetch once per day max
+
+        def load_form_cache():
+            try:
+                with open(FORM_CACHE_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+
+        def save_form_cache(data):
+            try:
+                with open(FORM_CACHE_FILE, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass
+
+        TEAM_IDS = {
+            "Manchester City": 47, "Arsenal": 42, "Liverpool": 40, "Aston Villa": 66,
+            "Tottenham": 43, "Manchester Utd": 33, "Chelsea": 49, "Newcastle": 34,
+            "Brighton": 51, "West Ham": 48, "Crystal Palace": 52, "Everton": 45,
+            "Fulham": 36, "Brentford": 55, "Bournemouth": 35, "Nott'm Forest": 65,
+            "Wolves": 39, "Leicester": 46, "Southampton": 41, "Ipswich": 62,
+        }
+
+        FORMATIONS_CODE = {
+            "3-4-3": 0, "3-5-2": 1, "3-4-1-2": 2, "3-2-4-1": 3, "3-4-2-1": 4, "3-3-1-3": 5,
+            "4-2-3-1": 6, "4-3-3": 7, "4-4-2": 8, "4-4-2 Diamond": 9, "4-1-4-1": 10,
+            "4-3-2-1": 11, "4-2-2-2": 12, "5-3-2": 13, "5-4-1": 14, "5-2-2-1": 15, "5-2-3": 16
+        }
+
+        def fetch_last5(team_name, api_key):
+            """
+            Fetch last 5 completed fixtures for a team.
+            Uses form_cache.json to avoid repeat API calls within 24 hrs.
+            Returns list of dicts: {fixture_id, formation, scored, conceded, result, competition, opponent}
+            Costs: 1 API call (fixtures) + up to 5 (lineups) = 6 requests per team.
+            """
+            form_cache = load_form_cache()
+            cache_entry = form_cache.get(team_name, {})
+            age = _time.time() - cache_entry.get("fetched_at", 0)
+            if cache_entry and age < FORM_CACHE_TTL:
+                return cache_entry.get("matches", []), True  # True = from cache
+
+            team_id = TEAM_IDS.get(team_name)
+            if not team_id:
+                return [], False
+
+            headers = {"x-apisports-key": api_key, "x-apisports-host": "v3.football.api-sports.io"}
+
+            # 1 request: get last 5 finished matches across ALL competitions
+            try:
+                r = _req.get(
+                    f"https://v3.football.api-sports.io/fixtures?team={team_id}&last=5&status=FT",
+                    headers=headers, timeout=12
+                )
+            except Exception as e:
+                return [], False
+
+            if r.status_code != 200:
+                return [], False
+
+            fixtures = r.json().get("response", [])
+            results = []
+
+            for fix in fixtures:
+                fid        = fix["fixture"]["id"]
+                home_id    = fix["teams"]["home"]["id"]
+                home_goals = fix["goals"]["home"] or 0
+                away_goals = fix["goals"]["away"] or 0
+                is_home    = (home_id == team_id)
+                scored     = home_goals if is_home else away_goals
+                conceded   = away_goals if is_home else home_goals
+                opp_name   = fix["teams"]["away"]["name"] if is_home else fix["teams"]["home"]["name"]
+                competition = fix.get("league", {}).get("name", "Unknown")
+                result     = "W" if scored > conceded else ("D" if scored == conceded else "L")
+
+                # 1 request per fixture: get the lineup/formation
+                formation_used = "Unknown"
+                try:
+                    lr = _req.get(
+                        f"https://v3.football.api-sports.io/fixtures/lineups?fixture={fid}",
+                        headers=headers, timeout=12
+                    )
+                    _time.sleep(0.3)
+                    if lr.status_code == 200:
+                        lineup_data = lr.json().get("response", [])
+                        for side in lineup_data:
+                            if side.get("team", {}).get("id") == team_id:
+                                formation_used = side.get("formation", "Unknown")
+                                break
+                except Exception:
+                    pass
+
+                results.append({
+                    "fixture_id":  fid,
+                    "formation":   formation_used,
+                    "scored":      scored,
+                    "conceded":    conceded,
+                    "result":      result,
+                    "competition": competition,
+                    "opponent":    opp_name,
+                })
+
+            # Save to cache
+            form_cache[team_name] = {"fetched_at": _time.time(), "matches": results}
+            save_form_cache(form_cache)
+            return results, False  # False = fetched fresh from API
+
+        def compute_dynamic_ratings(last5):
+            """
+            Derive Attack and Defence ratings from actual last-5 results.
+            Goals scored  → Attack rating  (scale 60–99)
+            Goals conceded → Defence rating (scale 60–99)
+            """
+            if not last5:
+                return None, None
+            avg_scored   = sum(m["scored"]   for m in last5) / len(last5)
+            avg_conceded = sum(m["conceded"] for m in last5) / len(last5)
+            # Map: avg goals ~0–4+ per game → 60–99
+            attack  = min(99, int(60 + avg_scored   * 9.75))
+            defence = min(99, int(99 - avg_conceded * 9.75))
+            defence = max(60, defence)
+            return attack, defence
+
+        def most_used_formation(last5):
+            """Return the formation used most often in the last 5 games."""
+            counts = {}
+            for m in last5:
+                f = m["formation"]
+                if f and f != "Unknown":
+                    counts[f] = counts.get(f, 0) + 1
+            if not counts:
+                return None
+            return max(counts, key=counts.get)
+
+        # ── UI ─────────────────────────────────────────────────────────────────
+        api_key = st.secrets.get("API_SPORTS_KEY", "")
+
+        form_cache = load_form_cache()
+        my_cached   = form_cache.get(my_team,  {})
+        opp_cached  = form_cache.get(opp_team, {})
+        my_age_h    = int((_time.time() - my_cached.get("fetched_at", 0))  / 3600) if my_cached  else None
+        opp_age_h   = int((_time.time() - opp_cached.get("fetched_at", 0)) / 3600) if opp_cached else None
+
+        cache_note = ""
+        if my_cached and opp_cached:
+            cache_note = f"📦 Using cached form data — {my_team}: {my_age_h}h ago | {opp_team}: {opp_age_h}h ago"
+            st.caption(cache_note)
+
+        fetch_btn_label = "🔍 Fetch Last 5 Matches & Generate Optimal Tactics"
+        if my_cached and opp_cached:
+            fetch_btn_label = "♻️ Generate Tactics (Cached) / Re-Fetch Last 5"
+
+        # ── API cost warning ────────────────────────────────────────────────────
+        with st.expander("ℹ️ API Usage Info"):
+            st.markdown(
+                "**Fetching fresh data costs ~12 API requests** (1 fixtures + 5 lineups per team × 2 teams). "
+                "Results are cached for 24 hours — subsequent clicks reuse the cache at **zero cost**. "
+                "The GitHub Actions weekly updater uses ~41 of your 100 daily requests, "
+                "so you have ~59 remaining for in-app fetches (~4 fresh fetches per day)."
+            )
+
+        if st.button(fetch_btn_label, use_container_width=True, type="primary"):
             if my_team == opp_team:
                 st.error("🚨 Tactical Error: A team cannot play against itself!")
+            elif not api_key:
+                st.error("🚨 API_SPORTS_KEY missing from Streamlit Secrets. Cannot fetch form data.")
             else:
-                my_att, my_def = teams_db[my_team]["Attack"], teams_db[my_team]["Defense"]
-                opp_att, opp_def = teams_db[opp_team]["Attack"], teams_db[opp_team]["Defense"]
-                
-                best_prob, best_form = 0, ""
-                for f_code, f_name in formations_map.items():
-                    test_match = pd.DataFrame({'Formation': [f_code], 'Team_Attack': [my_att], 'Team_Defense': [my_def], 'Opp_Attack': [opp_att], 'Opp_Defense': [opp_def]})
-                    prob = model.predict_proba(test_match)[0][1] * 100
-                    if prob > best_prob: best_prob, best_form = prob, f_name
-                        
-                res_col1, res_col2 = st.columns(2)
-                res_col1.metric("Recommended Formation", best_form)
-                res_col2.metric("AI Win Probability", f"{best_prob:.1f}%")
+                with st.spinner(f"📡 Fetching last 5 matches for {my_team} and {opp_team}..."):
+                    my_last5,  my_cached_flag  = fetch_last5(my_team,  api_key)
+                    opp_last5, opp_cached_flag = fetch_last5(opp_team, api_key)
 
-                st.markdown("### AI Recommended Starting XI")
-                xi = select_starting_xi(my_team, best_form)
-                if xi:
-                    for p in xi:
-                        st.markdown(f"<div class='player-card'><span><b>{p['Pos']}</b> | {p['Name']}</span> <span class='stat-text'>⏱️ {p['Min']} mins | ⚽ {p['G_A']} G+A</span></div>", unsafe_allow_html=True)
+                if not my_last5 and not opp_last5:
+                    st.error("🚨 Could not fetch match data for either team. Check your API key and quota.")
                 else:
-                    st.warning(f"No player data found in players.json for '{my_team}'.")
+                    # ── Derive live ratings from actual results ─────────────────
+                    my_att_dyn,  my_def_dyn  = compute_dynamic_ratings(my_last5)
+                    opp_att_dyn, opp_def_dyn = compute_dynamic_ratings(opp_last5)
+
+                    # Fall back to static ratings if API returned nothing
+                    my_att  = my_att_dyn  if my_att_dyn  else teams_db.get(my_team,  {}).get("Attack",  80)
+                    my_def  = my_def_dyn  if my_def_dyn  else teams_db.get(my_team,  {}).get("Defense", 80)
+                    opp_att = opp_att_dyn if opp_att_dyn else teams_db.get(opp_team, {}).get("Attack",  80)
+                    opp_def = opp_def_dyn if opp_def_dyn else teams_db.get(opp_team, {}).get("Defense", 80)
+
+                    # ── Opponent's habitual formation → penalty for tactics that concede to it ──
+                    opp_habit_form = most_used_formation(opp_last5)
+
+                    # ── Score every formation through the ML model ──────────────
+                    best_prob, best_form = 0, ""
+                    all_scores = {}
+                    for f_code, f_name in formations_map.items():
+                        test = pd.DataFrame({
+                            "Formation":    [f_code],
+                            "Team_Attack":  [my_att],
+                            "Team_Defense": [my_def],
+                            "Opp_Attack":   [opp_att],
+                            "Opp_Defense":  [opp_def],
+                        })
+                        prob = model.predict_proba(test)[0][1] * 100
+
+                        # Bonus: AI rewards formations your team actually knows how to play
+                        my_habit = most_used_formation(my_last5)
+                        if my_habit and f_name == my_habit:
+                            prob += 5  # familiarity bonus
+
+                        # Penalty: avoid formations that historically struggle vs opp's style
+                        if opp_habit_form:
+                            opp_backs = int(opp_habit_form.split("-")[0]) if opp_habit_form[0].isdigit() else 4
+                            my_backs  = int(f_name.split("-")[0]) if f_name[0].isdigit() else 4
+                            if opp_backs <= 3 and f_name in ["4-2-3-1", "4-3-3", "4-4-2"]:
+                                prob -= 3  # narrow 3-back opp exploits wide 4-back shapes slightly
+                            if opp_backs >= 5 and f_name.startswith("3"):
+                                prob -= 5  # 5-back opp shuts down 3-back attack
+
+                        all_scores[f_name] = round(prob, 1)
+                        if prob > best_prob:
+                            best_prob, best_form = prob, f_name
+
+                    # ── Results display ────────────────────────────────────────
+                    st.markdown("---")
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("✅ Recommended Formation", best_form)
+                    r2.metric("🤖 AI Win Probability",    f"{best_prob:.1f}%")
+                    r3.metric("📐 Opp. Usual Formation",  opp_habit_form or "Unknown")
+
+                    # ── Last 5 form tables ──────────────────────────────────────
+                    st.markdown("### 📋 Recent Form Analysis")
+                    fc1, fc2 = st.columns(2)
+
+                    def render_form_table(team_name, last5, att, dfn, cached):
+                        label = "📦 cached" if cached else "🔴 live"
+                        st.markdown(f"**{team_name}** &nbsp; <span style='font-size:12px;color:#8ca892'>({label})</span>", unsafe_allow_html=True)
+                        st.caption(f"Dynamic ratings → ⚔️ Attack: {att} | 🛡️ Defence: {dfn}")
+                        for m in last5:
+                            colour = {"W": "#22c55e", "D": "#f59e0b", "L": "#ef4444"}.get(m["result"], "#8ca892")
+                            badge  = f"<span style='background:{colour};color:#000;padding:1px 6px;border-radius:3px;font-weight:bold;font-size:12px'>{m['result']}</span>"
+                            form_tag = f"<code style='font-size:11px'>{m['formation']}</code>"
+                            st.markdown(
+                                f"{badge} &nbsp; vs **{m['opponent']}** &nbsp; "
+                                f"{m['scored']}–{m['conceded']} &nbsp; {form_tag} &nbsp; "
+                                f"<span style='font-size:11px;color:#8ca892'>{m['competition']}</span>",
+                                unsafe_allow_html=True
+                            )
+
+                    with fc1:
+                        render_form_table(my_team,  my_last5,  my_att,  my_def,  my_cached_flag)
+                    with fc2:
+                        render_form_table(opp_team, opp_last5, opp_att, opp_def, opp_cached_flag)
+
+                    # ── Formation leaderboard ───────────────────────────────────
+                    st.markdown("### 🏆 Formation Win-Probability Ranking")
+                    sorted_forms = sorted(all_scores.items(), key=lambda x: x[1], reverse=True)
+                    for rank, (fname, score) in enumerate(sorted_forms[:5], 1):
+                        medal = ["🥇","🥈","🥉","4️⃣","5️⃣"][rank-1]
+                        bar_w = int((score / 100) * 300)
+                        st.markdown(
+                            f"{medal} **{fname}** &nbsp;"
+                            f"<span style='display:inline-block;width:{bar_w}px;height:10px;"
+                            f"background:#22c55e;border-radius:3px;vertical-align:middle'></span>"
+                            f"&nbsp; {score}%",
+                            unsafe_allow_html=True
+                        )
+
+                    # ── Starting XI ─────────────────────────────────────────────
+                    st.markdown(f"### 👕 AI Recommended Starting XI — {best_form}")
+                    xi = select_starting_xi(my_team, best_form)
+                    if xi:
+                        for p in xi:
+                            fallback_warn = " ⚠️ *position gap filled*" if p.get("fallback") else ""
+                            g_a_val = p['G_A']
+                            # G_A stored as float ratio in some builds — display cleanly
+                            g_a_str = str(g_a_val) if isinstance(g_a_val, int) else f"{g_a_val:.2f}"
+                            st.markdown(
+                                f"<div class='player-card'>"
+                                f"<span><b>{get_primary_pos(p['Pos'])}</b> | {p['Name']}{fallback_warn}</span>"
+                                f"<span class='stat-text'>⏱️ {p['Min']} mins | ⚽ {g_a_str} G+A</span>"
+                                f"</div>",
+                                unsafe_allow_html=True
+                            )
+                    else:
+                        st.warning(f"No player data found in players.json for '{my_team}'.")
 
     # ---------------------------------------------------------
     # MODULE 2: PRE-MATCH OPPONENT ANALYSIS
