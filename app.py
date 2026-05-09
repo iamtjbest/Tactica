@@ -3,11 +3,11 @@ import pandas as pd
 import numpy as np
 import json
 import re
-import difflib
-import random
+import joblib
 import google.generativeai as genai
-import requests  # <--- THIS IS THE MISSING PIECE
-from datetime import datetime  # <--- AND THIS ONE
+import os
+import difflib
+import random # NEW: Added for dynamic response generation
 from sklearn.ensemble import RandomForestClassifier
 
 # Fetch the API key from Streamlit secrets
@@ -22,7 +22,7 @@ st.set_page_config(page_title="Tactical AI", page_icon="⚽", layout="wide")
 
 st.markdown("""
 <style>
-.stApp { background-color: #0b210e; background-image: gradient(0deg, #0b210e, #0b210e 60px, #0f2b13 60px, #0f2b13 120px); }
+.stApp { background-color: #0b210e; background-image: repeating-linear-gradient(0deg, #0b210e, #0b210e 60px, #0f2b13 60px, #0f2b13 120px); }
 h1 { color: #22c55e !important; text-shadow: 0px 0px 10px rgba(34, 197, 94, 0.4); text-transform: uppercase; }
 div[data-testid="metric-container"] { background: rgba(0, 0, 0, 0.6); padding: 15px; border-radius: 8px; border-left: 3px solid #22c55e; }
 .player-card { background: rgba(0, 0, 0, 0.7); border: 1px solid #22c55e; border-radius: 5px; padding: 10px; margin-bottom: 5px; color: white; display: flex; justify-content: space-between;}
@@ -477,132 +477,285 @@ if teams_db:
                 colB.write(sub_advice if sub_advice else "No emergency substitutions required based on current data. Monitor stamina levels.")
 
     # ---------------------------------------------------------
-    # MODULE 5: ASSISTANT MANAGER AI (GEMINI ENGINE)
+    # MODULE 5: ASSISTANT MANAGER CHAT (with Live Match Intel)
     # ---------------------------------------------------------
-    elif app_mode == "💬 Assistant Manager Chat":  # <--- CHANGED "AI" TO "Chat"
-        st.markdown("## 💬 Tactical AI Assistant")
-        st.write("Select your matchup. The AI will draw the latest stats from the database to generate customized advice.")
-        
+    elif app_mode == "💬 Assistant Manager Chat":
+        import time as _time
+        import requests as _requests
+
+        st.markdown("## 💬 Assistant Manager Chat")
+        st.write("Select your teams, sync live match data from any competition, then chat with your AI assistant manager.")
+
+        # ── Team selectors ────────────────────────────────────────
         col1, col2 = st.columns(2)
-        with col1: 
-            ai_my_team = st.selectbox("Your Team (AI Focus)", list(teams_db.keys()), index=0, key="ai_my_team")
-        with col2: 
-            ai_opp_team = st.selectbox("Opponent", list(teams_db.keys()), index=1 if len(teams_db) > 1 else 0, key="ai_opp_team")
-            
+        with col1:
+            chat_my_team = st.selectbox("Your Team", list(teams_db.keys()), index=0, key="chat_team")
+        with col2:
+            chat_opp_team = st.selectbox("Opponent", list(teams_db.keys()), index=1 if len(teams_db) > 1 else 0, key="chat_opp")
+
         st.markdown("---")
 
-        # --- THE LIVE API-SPORTS BYPASS ENGINE ---
-        if st.button("📡 Sync Live Match Data", use_container_width=True, type="primary"):
-            api_sports_key = st.secrets.get("API_SPORTS_KEY")
-            
-            if not api_sports_key:
-                st.error("🚨 API_SPORTS_KEY is missing from Streamlit secrets!")
-            else:
-                with st.spinner(f"Scanning global databases for {ai_my_team}'s fixture today..."):
-                    headers = {'x-apisports-key': api_sports_key}
-                    
-                    # 1. Map known teams directly to save API calls and prevent search errors
-                    known_teams = {
-                        "Arsenal": 42,
-                        "Atlético Madrid": 530,
-                        "Aston Villa": 66,
-                        "Real Madrid": 541,
-                        "Manchester Utd": 33,
-                        "Chelsea": 49,
-                        "Liverpool": 40,
-                        "Manchester City": 47
-                        # Add any other teams from your teams.json here
-                    }
-                    
-                    team_id = known_teams.get(ai_my_team)
-                    
-                    # If the team isn't in our hardcoded list, try the API search
-                    if not team_id:
-                        search_url = f"https://v3.football.api-sports.io/teams?search={ai_my_team}"
-                        search_res = requests.get(search_url, headers=headers).json()
-                        
-                        # Catch exact API errors (like rate limits)
-                        if search_res.get('errors'):
-                            st.error(f"API Error: {search_res['errors']}")
-                            st.stop()
-                            
-                        if not search_res.get('response'):
-                            st.error(f"Could not locate '{ai_my_team}' in the global API database.")
-                            st.stop()
-                        else:
-                            team_id = search_res['response'][0]['team']['id']
-                            
-                    # 2. Fetch ANY fixture for this team for today
-                    today_str = datetime.now().strftime('%Y-%m-%d')
-                    fix_url = f"https://v3.football.api-sports.io/fixtures?team={team_id}&date={today_str}"
-                    fix_res = requests.get(fix_url, headers=headers).json()
-                    
-                    # Catch API errors on the fixture call
-                    if fix_res.get('errors'):
-                        st.error(f"API Error: {fix_res['errors']}")
-                    elif not fix_res.get('response'):
-                        st.warning(f"⚠️ {ai_my_team} does not have a professional fixture scheduled for today ({today_str}).")
-                    else:
-                        # 3. Extract the exact match context
-                        fixture_data = fix_res['response'][0]
-                        status = fixture_data['fixture']['status']['short']
-                        elapsed = fixture_data['fixture']['status']['elapsed']
-                        home_team = fixture_data['teams']['home']['name']
-                        away_team = fixture_data['teams']['away']['name']
-                        goals_home = fixture_data['goals']['home'] if fixture_data['goals']['home'] is not None else 0
-                        goals_away = fixture_data['goals']['away'] if fixture_data['goals']['away'] is not None else 0
-                        
-                        match_context = f"{home_team} {goals_home} - {goals_away} {away_team} | Min: {elapsed}' | Status: {status}"
-                        
-                        # Lock the data into the session state to open the chat
-                        st.session_state.ai_synced = True
-                        st.session_state.live_match_context = match_context
-                        st.success(f"✅ Data Synced! Live Feed: {match_context}")
+        # ── Live Match Intel Panel ────────────────────────────────
+        st.markdown("### 📡 Live Match Intel")
 
-        # --- THE CHAT INTERFACE ---
-        if st.session_state.get("ai_synced", False):
-            st.markdown(f"<div class='live-suggestion'><b>📡 ACTIVE FEED:</b> {st.session_state.live_match_context}</div>", unsafe_allow_html=True)
-            
-            gemini_ready = False
+        LIVE_CACHE_FILE = "live_match_cache.json"
+        CACHE_TTL_SECONDS = 300  # 5 minutes — read from cache before hitting API again
+
+        def load_live_cache():
+            """Load the on-disk live match cache."""
             try:
-                if "GEMINI_API_KEY" in st.secrets:
-                    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-                    model_ai = genai.GenerativeModel('gemini-pro')
-                    gemini_ready = True
-                else:
-                    st.warning("⚠️ GEMINI_API_KEY not found in Streamlit Secrets.")
-            except Exception as e:
-                st.error(f"Failed to load AI: {e}")
-            
-            if "messages" not in st.session_state:
-                st.session_state.messages = []
+                with open(LIVE_CACHE_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
 
-            for message in st.session_state.messages:
-                with st.chat_message(message["role"]):
-                    st.markdown(message["content"])
+        def save_live_cache(data: dict):
+            """Persist live match data to disk so the sync button reads cache first."""
+            try:
+                with open(LIVE_CACHE_FILE, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+            except Exception:
+                pass  # Don't crash the app over a cache write failure
 
-            if prompt := st.chat_input(f"E.g., Based on the live score, how should {ai_my_team} adjust?"):
-                with st.chat_message("user"):
-                    st.markdown(prompt)
-                st.session_state.messages.append({"role": "user", "content": prompt})
+        def build_cache_key(team_a: str, team_b: str) -> str:
+            return f"{team_a.lower().strip()}__vs__{team_b.lower().strip()}"
 
+        # Check cache first
+        live_cache = load_live_cache()
+        cache_key = build_cache_key(chat_my_team, chat_opp_team)
+        cached_entry = live_cache.get(cache_key)
+
+        cache_age_seconds = None
+        if cached_entry:
+            cache_age_seconds = _time.time() - cached_entry.get("fetched_at", 0)
+            cache_is_fresh = cache_age_seconds < CACHE_TTL_SECONDS
+        else:
+            cache_is_fresh = False
+
+        # Resolve what live context to use
+        if cache_is_fresh and cached_entry.get("match_found"):
+            # Fresh cache hit — display without an API call
+            d = cached_entry
+            mins_old = int(cache_age_seconds / 60)
+            st.markdown(
+                f"""<div class='live-suggestion'>
+                <b>✅ LIVE: {d['home_name']} {d['home_goals']} – {d['away_goals']} {d['away_name']}</b>
+                &nbsp;|&nbsp; ⏱️ Minute {d['minute']}' &nbsp;|&nbsp; 🏆 {d['competition']}
+                <br><span style='font-size:12px;color:#86efac'>Data cached {mins_old} min ago — sync to refresh</span>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+            live_context_for_ai = (
+                f"LIVE MATCH DATA ({d['competition']}): "
+                f"Match Minute {d['minute']}'. "
+                f"Current Scoreline: {d['home_name']} {d['home_goals']} – {d['away_goals']} {d['away_name']}. "
+                f"Venue: {d.get('venue', 'Unknown')}."
+            )
+            st.session_state.live_context = live_context_for_ai
+
+        elif cached_entry and not cached_entry.get("match_found"):
+            mins_old = int(cache_age_seconds / 60) if cache_age_seconds else "?"
+            st.info(f"ℹ️ Last sync ({mins_old} min ago): {chat_my_team} was not in a live fixture across any competition.")
+            st.session_state.live_context = "No live match currently in progress for this team. Advise based on pre-match context."
+
+        else:
+            st.info("No live data cached for this fixture. Hit **Sync** to search all live competitions.")
+            if "live_context" not in st.session_state:
+                st.session_state.live_context = "No live data synced yet. Provide general tactical advice."
+
+        # ── Sync button with cooldown ─────────────────────────────
+        last_sync_time = st.session_state.get("last_live_sync", 0)
+        seconds_since_sync = _time.time() - last_sync_time
+        SYNC_COOLDOWN = 300  # 5 min between API hits
+
+        sync_ready = seconds_since_sync >= SYNC_COOLDOWN
+        if sync_ready:
+            btn_label = "🔄 Sync Live Data (All Competitions)"
+        else:
+            mins_left = max(1, int((SYNC_COOLDOWN - seconds_since_sync) / 60))
+            btn_label = f"🔄 Sync Live Data (cooldown: ~{mins_left} min)"
+
+        if st.button(btn_label, use_container_width=True, disabled=not sync_ready):
+            api_sports_key = st.secrets.get("API_SPORTS_KEY")
+            if not api_sports_key:
+                st.error("🚨 API_SPORTS_KEY is missing from Streamlit Secrets! Add it under Settings → Secrets.")
+            else:
+                with st.spinner("🌐 Scanning all live fixtures across global competitions..."):
+                    headers = {
+                        "x-apisports-key": api_sports_key,
+                        "x-apisports-host": "v3.football.api-sports.io"
+                    }
+                    try:
+                        # Single API call — fetches ALL live matches worldwide (UCL, EPL, La Liga, etc.)
+                        res = _requests.get(
+                            "https://v3.football.api-sports.io/fixtures?live=all",
+                            headers=headers,
+                            timeout=12
+                        )
+                        st.session_state.last_live_sync = _time.time()
+
+                        if res.status_code == 429:
+                            st.error("🚨 Daily API quota exhausted. Cache will be used until midnight UTC resets your limit.")
+                        elif res.status_code != 200:
+                            st.error(f"🚨 API returned status {res.status_code}. Verify your API key in Streamlit Secrets.")
+                        else:
+                            live_data = res.json().get("response", [])
+                            match_found = False
+
+                            for match in live_data:
+                                home_name  = match["teams"]["home"]["name"]
+                                away_name  = match["teams"]["away"]["name"]
+                                home_id    = match["teams"]["home"]["id"]
+                                away_id    = match["teams"]["away"]["id"]
+
+                                # Fuzzy match — works for partial names and alternate spellings
+                                my_team_hits  = (chat_my_team.lower() in home_name.lower() or
+                                                 chat_my_team.lower() in away_name.lower() or
+                                                 home_name.lower() in chat_my_team.lower() or
+                                                 away_name.lower() in chat_my_team.lower())
+                                opp_team_hits = (chat_opp_team.lower() in home_name.lower() or
+                                                 chat_opp_team.lower() in away_name.lower() or
+                                                 home_name.lower() in chat_opp_team.lower() or
+                                                 away_name.lower() in chat_opp_team.lower())
+
+                                if my_team_hits and opp_team_hits:
+                                    minute      = match["fixture"]["status"].get("elapsed") or 0
+                                    home_goals  = match["goals"]["home"] if match["goals"]["home"] is not None else 0
+                                    away_goals  = match["goals"]["away"] if match["goals"]["away"] is not None else 0
+                                    competition = match.get("league", {}).get("name", "Unknown Competition")
+                                    venue       = match.get("fixture", {}).get("venue", {}).get("name", "Unknown Venue")
+                                    status_long = match["fixture"]["status"].get("long", "Live")
+
+                                    # Persist to cache
+                                    entry = {
+                                        "fetched_at":  _time.time(),
+                                        "match_found": True,
+                                        "home_name":   home_name,
+                                        "away_name":   away_name,
+                                        "home_goals":  home_goals,
+                                        "away_goals":  away_goals,
+                                        "minute":      minute,
+                                        "competition": competition,
+                                        "venue":       venue,
+                                        "status":      status_long,
+                                    }
+                                    live_cache[cache_key] = entry
+                                    save_live_cache(live_cache)
+
+                                    live_context_str = (
+                                        f"LIVE MATCH DATA ({competition}): "
+                                        f"Match Minute {minute}'. "
+                                        f"Current Scoreline: {home_name} {home_goals} – {away_goals} {away_name}. "
+                                        f"Venue: {venue}. Status: {status_long}."
+                                    )
+                                    st.session_state.live_context = live_context_str
+
+                                    st.markdown(
+                                        f"""<div class='live-suggestion'>
+                                        <b>✅ LIVE: {home_name} {home_goals} – {away_goals} {away_name}</b>
+                                        &nbsp;|&nbsp; ⏱️ Minute {minute}' &nbsp;|&nbsp; 🏆 {competition}
+                                        <br><span style='font-size:12px;color:#86efac'>📍 {venue} &nbsp;·&nbsp; {status_long} &nbsp;·&nbsp; Saved to cache</span>
+                                        </div>""",
+                                        unsafe_allow_html=True,
+                                    )
+                                    match_found = True
+                                    break
+
+                            if not match_found:
+                                # Cache the "no match" result too — avoids repeat API calls
+                                live_cache[cache_key] = {
+                                    "fetched_at":  _time.time(),
+                                    "match_found": False,
+                                }
+                                save_live_cache(live_cache)
+                                st.session_state.live_context = "No live match in progress for this fixture. Advise on pre-match / general context."
+                                st.warning(
+                                    f"⚠️ No live fixture found for **{chat_my_team}** vs **{chat_opp_team}** "
+                                    f"across any competition right now. Checked {len(live_data)} live matches worldwide."
+                                )
+
+                    except Exception as e:
+                        st.error(f"🚨 Connection error: {e}")
+
+        # ── Clear cache button (small, secondary) ─────────────────
+        if cached_entry:
+            if st.button("🗑️ Clear cached data for this fixture", key="clear_cache"):
+                live_cache.pop(cache_key, None)
+                save_live_cache(live_cache)
+                st.session_state.pop("live_context", None)
+                st.rerun()
+
+        st.markdown("---")
+
+        # ── Chat Interface ────────────────────────────────────────
+        st.markdown("### 🧠 Assistant Manager")
+
+        # Per-tab isolated chat history (keyed to the team pairing)
+        chat_session_key = f"messages__{cache_key}"
+        if chat_session_key not in st.session_state:
+            st.session_state[chat_session_key] = []
+
+        # Render existing messages
+        for message in st.session_state[chat_session_key]:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        # Chat input
+        if prompt := st.chat_input(f"Ask your assistant... e.g., 'How do we beat {chat_opp_team}?'"):
+            st.session_state[chat_session_key].append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            my_roster   = players_db.get(chat_my_team, [])
+            live_status = st.session_state.get("live_context", "No live data. Provide general pre-match tactical advice.")
+
+            # Build full conversation history for the AI (true multi-turn memory)
+            history_text = ""
+            for msg in st.session_state[chat_session_key][:-1]:  # exclude the message just added
+                role_label = "Coach" if msg["role"] == "user" else "Assistant"
+                history_text += f"{role_label}: {msg['content']}\n"
+
+            system_instruction = f"""You are an elite, world-class Assistant Football Manager AI.
+You are assisting the Head Coach of {chat_my_team}, currently facing {chat_opp_team}.
+
+LIVE MATCH STATUS:
+{live_status}
+
+OUR SQUAD ROSTER (Name | Position | Minutes Played | Goals+Assists):
+{json.dumps(my_roster, ensure_ascii=False)}
+
+CONVERSATION HISTORY (for context — do not repeat already-given advice):
+{history_text if history_text else "This is the start of the briefing."}
+
+INSTRUCTIONS:
+- Speak directly to the Head Coach. Be concise, tactical, and professional.
+- If LIVE MATCH DATA is present, anchor ALL advice to the current scoreline and match minute.
+- If no live data, give sharp pre-match tactical advice based on known team strengths.
+- Reference ONLY players from our squad roster above. Never invent player names.
+- Keep responses focused — 3 to 6 sentences unless the coach asks for a detailed breakdown.
+- Use football terminology (press triggers, half-spaces, double pivot, low block, etc.).
+"""
+
+            if gemini_api_key:
                 with st.chat_message("assistant"):
-                    if gemini_ready:
-                        # Feed the live API-Sports data directly into Gemini's system prompt
-                        system_prompt = f"""
-                        You are an elite football tactical Assistant Manager. Provide direct, tactical advice. 
-                        LIVE MATCH DATA: {st.session_state.live_match_context}.
-                        The Manager asks: "{prompt}"
-                        """
-                        try:
-                            response = model_ai.generate_content(system_prompt)
-                            ai_reply = response.text
-                            st.markdown(ai_reply)
-                            st.session_state.messages.append({"role": "assistant", "content": ai_reply})
-                        except Exception as e:
-                            st.error(f"Error communicating with Gemini: {e}")
-                    else:
-                        st.error("The Gemini Engine is offline.")
+                    message_placeholder = st.empty()
+                    try:
+                        full_prompt = f"{system_instruction}\n\nCoach's Question: {prompt}"
+                        response = ai_model.generate_content(full_prompt)
+                        assistant_reply = response.text
+                        message_placeholder.markdown(assistant_reply)
+                        st.session_state[chat_session_key].append({"role": "assistant", "content": assistant_reply})
+                    except Exception as e:
+                        message_placeholder.error(f"🚨 AI error: {e}")
+            else:
+                st.error("🚨 GEMINI_API_KEY is missing from Streamlit Secrets. The AI chat requires it.")
+
+        # Reset chat button
+        if st.session_state.get(chat_session_key):
+            if st.button("🔁 Reset Chat", key="reset_chat"):
+                st.session_state[chat_session_key] = []
+                st.rerun()
+
 
 else:
     st.warning("No teams loaded. Please check your teams.json file.")
