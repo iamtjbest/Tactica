@@ -22,7 +22,7 @@ st.set_page_config(page_title="Tactical AI", page_icon="⚽", layout="wide")
 
 st.markdown("""
 <style>
-.stApp { background-color: #0b210e; background-image: repeating-linear-gradient(0deg, #0b210e, #0b210e 60px, #0f2b13 60px, #0f2b13 120px); }
+.stApp { background-color: #0b210e; background-image: gradient(0deg, #0b210e, #0b210e 60px, #0f2b13 60px, #0f2b13 120px); }
 h1 { color: #22c55e !important; text-shadow: 0px 0px 10px rgba(34, 197, 94, 0.4); text-transform: uppercase; }
 div[data-testid="metric-container"] { background: rgba(0, 0, 0, 0.6); padding: 15px; border-radius: 8px; border-left: 3px solid #22c55e; }
 .player-card { background: rgba(0, 0, 0, 0.7); border: 1px solid #22c55e; border-radius: 5px; padding: 10px; margin-bottom: 5px; color: white; display: flex; justify-content: space-between;}
@@ -78,18 +78,15 @@ except Exception as e:
     players_db = {}
 
 
-# --- 3. ADVANCED PLAYER SELECTION ALGORITHM ---
+# --- 3. PLAYER SELECTION ALGORITHM ---
 def get_primary_pos(pos_string):
-    """Return the primary position from a compound string like 'MF,FW' or 'FW,MF'."""
-    if not pos_string:
-        return "Unknown"
-    return pos_string.split(",")[0].strip()
+    """Return first position from compound string e.g. 'MF,FW' → 'MF'."""
+    return (pos_string or "MF").split(",")[0].strip()
 
 def select_starting_xi(team_name, formation):
     """
-    Select the best 11 players for a given formation, strictly respecting
-    positional slots. Hybrid-position players (MF,FW) are only used for a
-    slot if their PRIMARY position matches. No more padding with wrong positions.
+    Select best 11 for a formation using strict primary-position drafting.
+    BSD positions: GK, DF, MF, FW (single, clean — no hybrid strings).
     """
     if team_name not in players_db:
         close_matches = difflib.get_close_matches(team_name, players_db.keys(), n=1, cutoff=0.6)
@@ -99,23 +96,19 @@ def select_starting_xi(team_name, formation):
             return None
 
     parts = [int(x) for x in re.findall(r'\d+', formation)]
-    def_count  = parts[0]
-    att_count  = parts[-1]
-    mid_count  = sum(parts[1:-1]) if len(parts) > 2 else parts[1]
+    def_count = parts[0]
+    att_count = parts[-1]
+    mid_count = sum(parts[1:-1]) if len(parts) > 2 else parts[1]
 
-    roster = players_db[team_name]
-    # Sort by minutes played first (form indicator), then G+A
+    roster        = players_db[team_name]
     sorted_roster = sorted(roster, key=lambda x: (x['Min'], x['G_A']), reverse=True)
-
     starting_xi   = []
     drafted_names = set()
 
     def draft_by_primary(primary_pos, count):
-        """Draft players whose FIRST listed position matches primary_pos."""
         drafted = 0
         for p in sorted_roster:
-            if drafted >= count:
-                break
+            if drafted >= count: break
             if get_primary_pos(p['Pos']) == primary_pos and p['Name'] not in drafted_names:
                 starting_xi.append(p)
                 drafted_names.add(p['Name'])
@@ -123,48 +116,34 @@ def select_starting_xi(team_name, formation):
         return drafted
 
     def draft_by_any(pos_keyword, count):
-        """Fallback: match pos_keyword anywhere in the position string."""
         drafted = 0
         for p in sorted_roster:
-            if drafted >= count:
-                break
+            if drafted >= count: break
             if pos_keyword in p['Pos'] and p['Name'] not in drafted_names:
                 starting_xi.append(p)
                 drafted_names.add(p['Name'])
                 drafted += 1
         return drafted
 
-    # 1. GK — strict primary match only
-    gk_drafted = draft_by_primary('GK', 1)
-    if gk_drafted < 1:
-        draft_by_any('GK', 1)
+    # GK
+    if draft_by_primary("GK", 1) < 1: draft_by_any("GK", 1)
+    # Defenders
+    n = draft_by_primary("DF", def_count)
+    if n < def_count: draft_by_any("DF", def_count - n)
+    # Midfielders
+    n = draft_by_primary("MF", mid_count)
+    if n < mid_count: draft_by_any("MF", mid_count - n)
+    # Forwards
+    n = draft_by_primary("FW", att_count)
+    if n < att_count: draft_by_any("FW", att_count - n)
 
-    # 2. Defenders — primary DF first, fall back to any DF tag
-    df_drafted = draft_by_primary('DF', def_count)
-    if df_drafted < def_count:
-        draft_by_any('DF', def_count - df_drafted)
-
-    # 3. Midfielders — primary MF first, fall back to any MF tag
-    mf_drafted = draft_by_primary('MF', mid_count)
-    if mf_drafted < mid_count:
-        draft_by_any('MF', mid_count - mf_drafted)
-
-    # 4. Forwards — primary FW first, fall back to any FW tag
-    fw_drafted = draft_by_primary('FW', att_count)
-    if fw_drafted < att_count:
-        draft_by_any('FW', att_count - fw_drafted)
-
-    # 5. Safety net: if still short of 11 (rare data gap), fill with highest-minute
-    #    remaining players but mark them clearly so the UI can flag them
-    if len(starting_xi) < 11:
-        for p in sorted_roster:
-            if len(starting_xi) >= 11:
-                break
-            if p['Name'] not in drafted_names:
-                p = dict(p)          # don't mutate the original
-                p['fallback'] = True
-                starting_xi.append(p)
-                drafted_names.add(p['Name'])
+    # Emergency fill (data gap) — flag with fallback key
+    for p in sorted_roster:
+        if len(starting_xi) >= 11: break
+        if p['Name'] not in drafted_names:
+            p = dict(p); p["fallback"] = True
+            starting_xi.append(p)
+            drafted_names.add(p['Name'])
 
     return starting_xi
 
@@ -183,300 +162,246 @@ if teams_db:
     # MODULE 1: PRE-MATCH AUTO-TACTICS
     # ---------------------------------------------------------
     if app_mode == "🤖 Pre-Match Auto-Tactics":
-        import requests as _req
-        import time as _time
+        import requests as _req, time as _time
 
         st.markdown("## 🤖 Pre-Match Auto-Tactics")
-        st.write("Select your teams. The engine reads each team's last 5 matches, extracts real formations used, "
-                 "calculates attack/defence ratings from actual results, then recommends the optimal game plan.")
+        st.write("Select your teams. The engine reads each team's last 5 matches via BSD API, "
+                 "extracts real formations used, calculates dynamic attack/defence ratings "
+                 "from actual results, then recommends the optimal game plan.")
 
         col1, col2 = st.columns(2)
         with col1: my_team  = st.selectbox("Your Team", list(teams_db.keys()), index=0)
         with col2: opp_team = st.selectbox("Opponent",  list(teams_db.keys()), index=1 if len(teams_db) > 1 else 0)
 
         FORM_CACHE_FILE = "form_cache.json"
-        FORM_CACHE_TTL  = 86400  # 24 hours — only re-fetch once per day max
+        FORM_CACHE_TTL  = 86400  # 24 hours
 
         def load_form_cache():
             try:
-                with open(FORM_CACHE_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                return {}
+                with open(FORM_CACHE_FILE, "r", encoding="utf-8") as f: return json.load(f)
+            except Exception: return {}
 
         def save_form_cache(data):
             try:
-                with open(FORM_CACHE_FILE, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-            except Exception:
-                pass
+                with open(FORM_CACHE_FILE, "w", encoding="utf-8") as f: json.dump(data, f, indent=2)
+            except Exception: pass
 
+        # BSD Team IDs — same as auto_updater.py
         TEAM_IDS = {
-            "Manchester City": 47, "Arsenal": 42, "Liverpool": 40, "Aston Villa": 66,
-            "Tottenham": 43, "Manchester Utd": 33, "Chelsea": 49, "Newcastle": 34,
-            "Brighton": 51, "West Ham": 48, "Crystal Palace": 52, "Everton": 45,
-            "Fulham": 36, "Brentford": 55, "Bournemouth": 35, "Nott'm Forest": 65,
-            "Wolves": 39, "Leicester": 46, "Southampton": 41, "Ipswich": 62,
-        }
-
-        FORMATIONS_CODE = {
-            "3-4-3": 0, "3-5-2": 1, "3-4-1-2": 2, "3-2-4-1": 3, "3-4-2-1": 4, "3-3-1-3": 5,
-            "4-2-3-1": 6, "4-3-3": 7, "4-4-2": 8, "4-4-2 Diamond": 9, "4-1-4-1": 10,
-            "4-3-2-1": 11, "4-2-2-2": 12, "5-3-2": 13, "5-4-1": 14, "5-2-2-1": 15, "5-2-3": 16
+            "Manchester City": 267, "Arsenal": 2,     "Liverpool": 10,
+            "Aston Villa": 24,      "Tottenham": 6,   "Manchester Utd": 8,
+            "Chelsea": 4,           "Newcastle": 19,  "Brighton": 36,
+            "West Ham": 20,         "Crystal Palace": 31, "Everton": 14,
+            "Fulham": 43,           "Brentford": 189, "Bournemouth": 91,
+            "Nott'm Forest": 17,   "Wolves": 39,     "Leicester": 26,
+            "Southampton": 57,      "Ipswich": 40,
         }
 
         def fetch_last5(team_name, api_key):
             """
-            Fetch last 5 completed fixtures for a team.
-            Uses form_cache.json to avoid repeat API calls within 24 hrs.
-            Returns list of dicts: {fixture_id, formation, scored, conceded, result, competition, opponent}
-            Costs: 1 API call (fixtures) + up to 5 (lineups) = 6 requests per team.
+            BSD API v2 — fetch last 5 finished fixtures for a team.
+            Endpoints:
+              GET /api/v2/teams/{id}/fixtures/?status=finished&limit=5
+                Response: {"results": [event objects]}
+                Fields: id, home_team_id, home_team, away_team,
+                        home_score, away_score, league_name
+
+              GET /api/v2/events/{id}/lineups/
+                Response: {
+                  "lineup_status": "confirmed|predicted|unavailable",
+                  "lineups": {        ← null when status=="unavailable"
+                    "home": {"formation": "4-3-3", ...},
+                    "away": {"formation": "4-4-2", ...}
+                  }
+                }
+            Cached 24h in form_cache.json — free repeat calls.
             """
-            form_cache = load_form_cache()
-            cache_entry = form_cache.get(team_name, {})
-            age = _time.time() - cache_entry.get("fetched_at", 0)
-            if cache_entry and age < FORM_CACHE_TTL:
-                return cache_entry.get("matches", []), True  # True = from cache
+            cache     = load_form_cache()
+            entry     = cache.get(team_name, {})
+            cache_age = _time.time() - entry.get("fetched_at", 0)
+            if entry and cache_age < FORM_CACHE_TTL:
+                return entry.get("matches", []), True  # True = from cache
 
             team_id = TEAM_IDS.get(team_name)
-            if not team_id:
-                return [], False
+            if not team_id: return [], False
 
-            headers = {"x-apisports-key": api_key, "x-apisports-host": "v3.football.api-sports.io"}
+            hdrs = {"Authorization": f"Token {api_key}"}
 
-            # 1 request: get last 5 finished matches across ALL competitions
             try:
                 r = _req.get(
-                    f"https://v3.football.api-sports.io/fixtures?team={team_id}&last=5&status=FT",
-                    headers=headers, timeout=12
+                    f"https://sports.bzzoiro.com/api/v2/teams/{team_id}/fixtures/",
+                    headers=hdrs,
+                    params={"status": "finished", "limit": 5},
+                    timeout=12
                 )
-            except Exception as e:
-                return [], False
+            except Exception: return [], False
 
-            if r.status_code != 200:
-                return [], False
+            if r.status_code != 200: return [], False
 
-            fixtures = r.json().get("response", [])
-            results = []
+            fixtures = r.json().get("results", [])
+            results  = []
 
             for fix in fixtures:
-                fid        = fix["fixture"]["id"]
-                home_id    = fix["teams"]["home"]["id"]
-                home_goals = fix["goals"]["home"] or 0
-                away_goals = fix["goals"]["away"] or 0
+                fid        = fix.get("id", 0)
+                home_id    = fix.get("home_team_id", 0)
+                home_goals = fix.get("home_score") or 0
+                away_goals = fix.get("away_score") or 0
                 is_home    = (home_id == team_id)
                 scored     = home_goals if is_home else away_goals
                 conceded   = away_goals if is_home else home_goals
-                opp_name   = fix["teams"]["away"]["name"] if is_home else fix["teams"]["home"]["name"]
-                competition = fix.get("league", {}).get("name", "Unknown")
+                opp_name   = fix.get("away_team", "?") if is_home else fix.get("home_team", "?")
+                competition = fix.get("league_name", "Unknown")
                 result     = "W" if scored > conceded else ("D" if scored == conceded else "L")
 
-                # 1 request per fixture: get the lineup/formation
+                # Lineup/formation
                 formation_used = "Unknown"
                 try:
                     lr = _req.get(
-                        f"https://v3.football.api-sports.io/fixtures/lineups?fixture={fid}",
-                        headers=headers, timeout=12
+                        f"https://sports.bzzoiro.com/api/v2/events/{fid}/lineups/",
+                        headers=hdrs, timeout=12
                     )
-                    _time.sleep(0.3)
+                    _time.sleep(0.2)
                     if lr.status_code == 200:
-                        lineup_data = lr.json().get("response", [])
-                        for side in lineup_data:
-                            if side.get("team", {}).get("id") == team_id:
-                                formation_used = side.get("formation", "Unknown")
-                                break
-                except Exception:
-                    pass
+                        ld = lr.json()
+                        lu_status = ld.get("lineup_status", "unavailable")
+                        # lineups is null when status == "unavailable" — MUST check!
+                        if lu_status != "unavailable" and ld.get("lineups"):
+                            side = "home" if is_home else "away"
+                            formation_used = ld["lineups"].get(side, {}).get("formation") or "Unknown"
+                except Exception: pass
 
                 results.append({
-                    "fixture_id":  fid,
-                    "formation":   formation_used,
-                    "scored":      scored,
-                    "conceded":    conceded,
-                    "result":      result,
-                    "competition": competition,
-                    "opponent":    opp_name,
+                    "fixture_id": fid, "formation": formation_used,
+                    "scored": scored,  "conceded": conceded,
+                    "result": result,  "competition": competition, "opponent": opp_name,
                 })
 
-            # Save to cache
-            form_cache[team_name] = {"fetched_at": _time.time(), "matches": results}
-            save_form_cache(form_cache)
-            return results, False  # False = fetched fresh from API
+            cache[team_name] = {"fetched_at": _time.time(), "matches": results}
+            save_form_cache(cache)
+            return results, False
 
         def compute_dynamic_ratings(last5):
-            """
-            Derive Attack and Defence ratings from actual last-5 results.
-            Goals scored  → Attack rating  (scale 60–99)
-            Goals conceded → Defence rating (scale 60–99)
-            """
-            if not last5:
-                return None, None
+            if not last5: return None, None
             avg_scored   = sum(m["scored"]   for m in last5) / len(last5)
             avg_conceded = sum(m["conceded"] for m in last5) / len(last5)
-            # Map: avg goals ~0–4+ per game → 60–99
-            attack  = min(99, int(60 + avg_scored   * 9.75))
-            defence = min(99, int(99 - avg_conceded * 9.75))
-            defence = max(60, defence)
-            return attack, defence
+            return min(99, int(60 + avg_scored * 9.75)), max(60, min(99, int(99 - avg_conceded * 9.75)))
 
         def most_used_formation(last5):
-            """Return the formation used most often in the last 5 games."""
             counts = {}
             for m in last5:
-                f = m["formation"]
-                if f and f != "Unknown":
-                    counts[f] = counts.get(f, 0) + 1
-            if not counts:
-                return None
-            return max(counts, key=counts.get)
+                f = m.get("formation", "Unknown")
+                if f and f != "Unknown": counts[f] = counts.get(f, 0) + 1
+            return max(counts, key=counts.get) if counts else None
 
-        # ── UI ─────────────────────────────────────────────────────────────────
-        api_key = st.secrets.get("API_SPORTS_KEY", "")
-
+        # ── UI ──────────────────────────────────────────────────────────────
+        api_key    = st.secrets.get("BSD_API_KEY", "")
         form_cache = load_form_cache()
-        my_cached   = form_cache.get(my_team,  {})
-        opp_cached  = form_cache.get(opp_team, {})
-        my_age_h    = int((_time.time() - my_cached.get("fetched_at", 0))  / 3600) if my_cached  else None
-        opp_age_h   = int((_time.time() - opp_cached.get("fetched_at", 0)) / 3600) if opp_cached else None
+        my_cached  = form_cache.get(my_team, {})
+        opp_cached = form_cache.get(opp_team, {})
 
-        cache_note = ""
         if my_cached and opp_cached:
-            cache_note = f"📦 Using cached form data — {my_team}: {my_age_h}h ago | {opp_team}: {opp_age_h}h ago"
-            st.caption(cache_note)
+            my_h  = int((_time.time() - my_cached.get("fetched_at", 0))  / 3600)
+            opp_h = int((_time.time() - opp_cached.get("fetched_at", 0)) / 3600)
+            st.caption(f"📦 Cached form data — {my_team}: {my_h}h ago | {opp_team}: {opp_h}h ago")
 
-        fetch_btn_label = "🔍 Fetch Last 5 Matches & Generate Optimal Tactics"
-        if my_cached and opp_cached:
-            fetch_btn_label = "♻️ Generate Tactics (Cached) / Re-Fetch Last 5"
-
-        # ── API cost warning ────────────────────────────────────────────────────
-        with st.expander("ℹ️ API Usage Info"):
+        with st.expander("ℹ️ API Usage"):
             st.markdown(
-                "**Fetching fresh data costs ~12 API requests** (1 fixtures + 5 lineups per team × 2 teams). "
-                "Results are cached for 24 hours — subsequent clicks reuse the cache at **zero cost**. "
-                "The GitHub Actions weekly updater uses ~41 of your 100 daily requests, "
-                "so you have ~59 remaining for in-app fetches (~4 fresh fetches per day)."
+                "Fetching fresh data costs ~12 BSD API calls per run (no rate limits). "
+                "Results are **cached 24 hours** — subsequent clicks cost zero calls."
             )
 
-        if st.button(fetch_btn_label, use_container_width=True, type="primary"):
+        btn_label = ("♻️ Generate Tactics (Cached) / Re-Fetch Last 5"
+                     if my_cached and opp_cached
+                     else "🔍 Fetch Last 5 Matches & Generate Optimal Tactics")
+
+        if st.button(btn_label, use_container_width=True, type="primary"):
             if my_team == opp_team:
                 st.error("🚨 Tactical Error: A team cannot play against itself!")
             elif not api_key:
-                st.error("🚨 API_SPORTS_KEY missing from Streamlit Secrets. Cannot fetch form data.")
+                st.error("🚨 BSD_API_KEY missing from Streamlit Secrets.")
             else:
                 with st.spinner(f"📡 Fetching last 5 matches for {my_team} and {opp_team}..."):
-                    my_last5,  my_cached_flag  = fetch_last5(my_team,  api_key)
-                    opp_last5, opp_cached_flag = fetch_last5(opp_team, api_key)
+                    my_last5,  my_from_cache  = fetch_last5(my_team,  api_key)
+                    opp_last5, opp_from_cache = fetch_last5(opp_team, api_key)
 
                 if not my_last5 and not opp_last5:
-                    st.error("🚨 Could not fetch match data for either team. Check your API key and quota.")
+                    st.error("🚨 No match data returned. Check BSD_API_KEY and team IDs.")
                 else:
-                    # ── Derive live ratings from actual results ─────────────────
-                    my_att_dyn,  my_def_dyn  = compute_dynamic_ratings(my_last5)
-                    opp_att_dyn, opp_def_dyn = compute_dynamic_ratings(opp_last5)
+                    my_att_d,  my_def_d  = compute_dynamic_ratings(my_last5)
+                    opp_att_d, opp_def_d = compute_dynamic_ratings(opp_last5)
+                    my_att  = my_att_d  or teams_db.get(my_team,  {}).get("Attack",  80)
+                    my_def  = my_def_d  or teams_db.get(my_team,  {}).get("Defense", 80)
+                    opp_att = opp_att_d or teams_db.get(opp_team, {}).get("Attack",  80)
+                    opp_def = opp_def_d or teams_db.get(opp_team, {}).get("Defense", 80)
 
-                    # Fall back to static ratings if API returned nothing
-                    my_att  = my_att_dyn  if my_att_dyn  else teams_db.get(my_team,  {}).get("Attack",  80)
-                    my_def  = my_def_dyn  if my_def_dyn  else teams_db.get(my_team,  {}).get("Defense", 80)
-                    opp_att = opp_att_dyn if opp_att_dyn else teams_db.get(opp_team, {}).get("Attack",  80)
-                    opp_def = opp_def_dyn if opp_def_dyn else teams_db.get(opp_team, {}).get("Defense", 80)
+                    opp_habit = most_used_formation(opp_last5)
+                    my_habit  = most_used_formation(my_last5)
 
-                    # ── Opponent's habitual formation → penalty for tactics that concede to it ──
-                    opp_habit_form = most_used_formation(opp_last5)
-
-                    # ── Score every formation through the ML model ──────────────
+                    # Score all formations through ML model
                     best_prob, best_form = 0, ""
                     all_scores = {}
                     for f_code, f_name in formations_map.items():
-                        test = pd.DataFrame({
-                            "Formation":    [f_code],
-                            "Team_Attack":  [my_att],
-                            "Team_Defense": [my_def],
-                            "Opp_Attack":   [opp_att],
-                            "Opp_Defense":  [opp_def],
-                        })
+                        test = pd.DataFrame({"Formation": [f_code], "Team_Attack": [my_att],
+                                             "Team_Defense": [my_def], "Opp_Attack": [opp_att],
+                                             "Opp_Defense": [opp_def]})
                         prob = model.predict_proba(test)[0][1] * 100
-
-                        # Bonus: AI rewards formations your team actually knows how to play
-                        my_habit = most_used_formation(my_last5)
-                        if my_habit and f_name == my_habit:
-                            prob += 5  # familiarity bonus
-
-                        # Penalty: avoid formations that historically struggle vs opp's style
-                        if opp_habit_form:
-                            opp_backs = int(opp_habit_form.split("-")[0]) if opp_habit_form[0].isdigit() else 4
-                            my_backs  = int(f_name.split("-")[0]) if f_name[0].isdigit() else 4
-                            if opp_backs <= 3 and f_name in ["4-2-3-1", "4-3-3", "4-4-2"]:
-                                prob -= 3  # narrow 3-back opp exploits wide 4-back shapes slightly
-                            if opp_backs >= 5 and f_name.startswith("3"):
-                                prob -= 5  # 5-back opp shuts down 3-back attack
-
+                        if my_habit and f_name == my_habit: prob += 5   # familiarity bonus
+                        if opp_habit:
+                            opp_backs = int(opp_habit.split("-")[0]) if opp_habit[0].isdigit() else 4
+                            if opp_backs >= 5 and f_name.startswith("3"): prob -= 5
                         all_scores[f_name] = round(prob, 1)
-                        if prob > best_prob:
-                            best_prob, best_form = prob, f_name
+                        if prob > best_prob: best_prob, best_form = prob, f_name
 
-                    # ── Results display ────────────────────────────────────────
+                    # Results
                     st.markdown("---")
                     r1, r2, r3 = st.columns(3)
                     r1.metric("✅ Recommended Formation", best_form)
-                    r2.metric("🤖 AI Win Probability",    f"{best_prob:.1f}%")
-                    r3.metric("📐 Opp. Usual Formation",  opp_habit_form or "Unknown")
+                    r2.metric("🤖 AI Win Probability", f"{best_prob:.1f}%")
+                    r3.metric("📐 Opp. Usual Formation", opp_habit or "Unknown")
 
-                    # ── Last 5 form tables ──────────────────────────────────────
-                    st.markdown("### 📋 Recent Form Analysis")
+                    # Form tables
+                    st.markdown("### 📋 Last 5 Matches")
                     fc1, fc2 = st.columns(2)
-
-                    def render_form_table(team_name, last5, att, dfn, cached):
+                    def render_form(tname, last5, att, dfn, cached):
                         label = "📦 cached" if cached else "🔴 live"
-                        st.markdown(f"**{team_name}** &nbsp; <span style='font-size:12px;color:#8ca892'>({label})</span>", unsafe_allow_html=True)
-                        st.caption(f"Dynamic ratings → ⚔️ Attack: {att} | 🛡️ Defence: {dfn}")
+                        st.markdown(f"**{tname}** <span style='font-size:12px;color:#8ca892'>({label})</span>", unsafe_allow_html=True)
+                        st.caption(f"⚔️ Attack: {att} | 🛡️ Defence: {dfn}")
                         for m in last5:
-                            colour = {"W": "#22c55e", "D": "#f59e0b", "L": "#ef4444"}.get(m["result"], "#8ca892")
-                            badge  = f"<span style='background:{colour};color:#000;padding:1px 6px;border-radius:3px;font-weight:bold;font-size:12px'>{m['result']}</span>"
-                            form_tag = f"<code style='font-size:11px'>{m['formation']}</code>"
+                            col = {"W":"#22c55e","D":"#f59e0b","L":"#ef4444"}.get(m["result"],"#8ca892")
+                            badge = f"<span style='background:{col};color:#000;padding:1px 6px;border-radius:3px;font-weight:bold;font-size:12px'>{m['result']}</span>"
                             st.markdown(
-                                f"{badge} &nbsp; vs **{m['opponent']}** &nbsp; "
-                                f"{m['scored']}–{m['conceded']} &nbsp; {form_tag} &nbsp; "
+                                f"{badge} vs **{m['opponent']}** {m['scored']}–{m['conceded']} "
+                                f"<code style='font-size:11px'>{m['formation']}</code> "
                                 f"<span style='font-size:11px;color:#8ca892'>{m['competition']}</span>",
-                                unsafe_allow_html=True
-                            )
+                                unsafe_allow_html=True)
+                    with fc1: render_form(my_team,  my_last5,  my_att,  my_def,  my_from_cache)
+                    with fc2: render_form(opp_team, opp_last5, opp_att, opp_def, opp_from_cache)
 
-                    with fc1:
-                        render_form_table(my_team,  my_last5,  my_att,  my_def,  my_cached_flag)
-                    with fc2:
-                        render_form_table(opp_team, opp_last5, opp_att, opp_def, opp_cached_flag)
-
-                    # ── Formation leaderboard ───────────────────────────────────
-                    st.markdown("### 🏆 Formation Win-Probability Ranking")
-                    sorted_forms = sorted(all_scores.items(), key=lambda x: x[1], reverse=True)
-                    for rank, (fname, score) in enumerate(sorted_forms[:5], 1):
+                    # Formation leaderboard
+                    st.markdown("### 🏆 Formation Ranking")
+                    for rank, (fname, score) in enumerate(sorted(all_scores.items(), key=lambda x: x[1], reverse=True)[:5], 1):
                         medal = ["🥇","🥈","🥉","4️⃣","5️⃣"][rank-1]
-                        bar_w = int((score / 100) * 300)
+                        bar   = int((score/100)*300)
                         st.markdown(
-                            f"{medal} **{fname}** &nbsp;"
-                            f"<span style='display:inline-block;width:{bar_w}px;height:10px;"
+                            f"{medal} **{fname}** "
+                            f"<span style='display:inline-block;width:{bar}px;height:10px;"
                             f"background:#22c55e;border-radius:3px;vertical-align:middle'></span>"
-                            f"&nbsp; {score}%",
-                            unsafe_allow_html=True
-                        )
+                            f" {score}%", unsafe_allow_html=True)
 
-                    # ── Starting XI ─────────────────────────────────────────────
+                    # Starting XI
                     st.markdown(f"### 👕 AI Recommended Starting XI — {best_form}")
                     xi = select_starting_xi(my_team, best_form)
                     if xi:
                         for p in xi:
-                            fallback_warn = " ⚠️ *position gap filled*" if p.get("fallback") else ""
-                            g_a_val = p['G_A']
-                            # G_A stored as float ratio in some builds — display cleanly
-                            g_a_str = str(g_a_val) if isinstance(g_a_val, int) else f"{g_a_val:.2f}"
+                            warn = " ⚠️" if p.get("fallback") else ""
+                            g_a  = f"{p['G_A']:.2f}" if isinstance(p['G_A'], float) else str(p['G_A'])
                             st.markdown(
                                 f"<div class='player-card'>"
-                                f"<span><b>{get_primary_pos(p['Pos'])}</b> | {p['Name']}{fallback_warn}</span>"
-                                f"<span class='stat-text'>⏱️ {p['Min']} mins | ⚽ {g_a_str} G+A</span>"
-                                f"</div>",
-                                unsafe_allow_html=True
-                            )
+                                f"<span><b>{get_primary_pos(p['Pos'])}</b> | {p['Name']}{warn}</span>"
+                                f"<span class='stat-text'>⏱️ {p['Min']} mins | ⚽ {g_a} G+A</span>"
+                                f"</div>", unsafe_allow_html=True)
                     else:
-                        st.warning(f"No player data found in players.json for '{my_team}'.")
+                        st.warning(f"No player data for '{my_team}' in players.json.")
 
     # ---------------------------------------------------------
     # MODULE 2: PRE-MATCH OPPONENT ANALYSIS
@@ -787,246 +712,186 @@ if teams_db:
                 colB.write(sub_advice if sub_advice else "No emergency substitutions required based on current data. Monitor stamina levels.")
 
     # ---------------------------------------------------------
-    # MODULE 5: ASSISTANT MANAGER CHAT (with Live Match Intel)
+    # MODULE 5: ASSISTANT MANAGER CHAT (BSD Live Intel)
     # ---------------------------------------------------------
     elif app_mode == "💬 Assistant Manager Chat":
-        import time as _time
-        import requests as _requests
+        import requests as _req, time as _time
 
         st.markdown("## 💬 Assistant Manager Chat")
         st.write("Select your teams, sync live match data from any competition, then chat with your AI assistant manager.")
 
-        # ── Team selectors ────────────────────────────────────────
         col1, col2 = st.columns(2)
-        with col1:
-            chat_my_team = st.selectbox("Your Team", list(teams_db.keys()), index=0, key="chat_team")
-        with col2:
-            chat_opp_team = st.selectbox("Opponent", list(teams_db.keys()), index=1 if len(teams_db) > 1 else 0, key="chat_opp")
+        with col1: chat_my_team  = st.selectbox("Your Team", list(teams_db.keys()), index=0, key="chat_team")
+        with col2: chat_opp_team = st.selectbox("Opponent",  list(teams_db.keys()), index=1 if len(teams_db) > 1 else 0, key="chat_opp")
 
         st.markdown("---")
-
-        # ── Live Match Intel Panel ────────────────────────────────
         st.markdown("### 📡 Live Match Intel")
 
         LIVE_CACHE_FILE = "live_match_cache.json"
-        CACHE_TTL_SECONDS = 300  # 5 minutes — read from cache before hitting API again
+        CACHE_TTL       = 300  # show cached data for 5 min before offering re-sync
 
         def load_live_cache():
-            """Load the on-disk live match cache."""
             try:
-                with open(LIVE_CACHE_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                return {}
+                return json.load(open(LIVE_CACHE_FILE, encoding="utf-8"))
+            except Exception: return {}
 
-        def save_live_cache(data: dict):
-            """Persist live match data to disk so the sync button reads cache first."""
+        def save_live_cache(data):
             try:
-                with open(LIVE_CACHE_FILE, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-            except Exception:
-                pass  # Don't crash the app over a cache write failure
+                json.dump(data, open(LIVE_CACHE_FILE, "w", encoding="utf-8"), indent=2)
+            except Exception: pass
 
-        def build_cache_key(team_a: str, team_b: str) -> str:
-            return f"{team_a.lower().strip()}__vs__{team_b.lower().strip()}"
+        def cache_key(t1, t2):
+            return f"{t1.lower().strip()}__vs__{t2.lower().strip()}"
 
-        # Check cache first
         live_cache = load_live_cache()
-        cache_key = build_cache_key(chat_my_team, chat_opp_team)
-        cached_entry = live_cache.get(cache_key)
+        ck         = cache_key(chat_my_team, chat_opp_team)
+        cached     = live_cache.get(ck, {})
+        cache_age  = _time.time() - cached.get("fetched_at", 0)
+        cache_ok   = cache_age < CACHE_TTL
 
-        cache_age_seconds = None
-        if cached_entry:
-            cache_age_seconds = _time.time() - cached_entry.get("fetched_at", 0)
-            cache_is_fresh = cache_age_seconds < CACHE_TTL_SECONDS
-        else:
-            cache_is_fresh = False
-
-        # Resolve what live context to use
-        if cache_is_fresh and cached_entry.get("match_found"):
-            # Fresh cache hit — display without an API call
-            d = cached_entry
-            mins_old = int(cache_age_seconds / 60)
+        # Display cached result if fresh
+        if cache_ok and cached.get("match_found"):
+            d = cached
             st.markdown(
-                f"""<div class='live-suggestion'>
-                <b>✅ LIVE: {d['home_name']} {d['home_goals']} – {d['away_goals']} {d['away_name']}</b>
-                &nbsp;|&nbsp; ⏱️ Minute {d['minute']}' &nbsp;|&nbsp; 🏆 {d['competition']}
-                <br><span style='font-size:12px;color:#86efac'>Data cached {mins_old} min ago — sync to refresh</span>
-                </div>""",
-                unsafe_allow_html=True,
+                f"<div class='live-suggestion'>"
+                f"<b>✅ LIVE: {d['home_name']} {d['home_goals']} – {d['away_goals']} {d['away_name']}</b>"
+                f" | ⏱️ {d['minute']}' | 🏆 {d['competition']}"
+                f"<br><span style='font-size:12px;color:#86efac'>Cached {int(cache_age/60)} min ago</span>"
+                f"</div>", unsafe_allow_html=True)
+            st.session_state.live_context = (
+                f"LIVE ({d['competition']}): Minute {d['minute']}'. "
+                f"Score: {d['home_name']} {d['home_goals']} – {d['away_goals']} {d['away_name']}."
             )
-            live_context_for_ai = (
-                f"LIVE MATCH DATA ({d['competition']}): "
-                f"Match Minute {d['minute']}'. "
-                f"Current Scoreline: {d['home_name']} {d['home_goals']} – {d['away_goals']} {d['away_name']}. "
-                f"Venue: {d.get('venue', 'Unknown')}."
-            )
-            st.session_state.live_context = live_context_for_ai
-
-        elif cached_entry and not cached_entry.get("match_found"):
-            mins_old = int(cache_age_seconds / 60) if cache_age_seconds else "?"
-            st.info(f"ℹ️ Last sync ({mins_old} min ago): {chat_my_team} was not in a live fixture across any competition.")
-            st.session_state.live_context = "No live match currently in progress for this team. Advise based on pre-match context."
-
+        elif cached and not cached.get("match_found"):
+            st.info(f"ℹ️ Last sync: {chat_my_team} not in a live fixture. Hit Sync to check again.")
         else:
-            st.info("No live data cached for this fixture. Hit **Sync** to search all live competitions.")
+            st.info("No live data cached. Hit **Sync** to search all live competitions worldwide.")
             if "live_context" not in st.session_state:
-                st.session_state.live_context = "No live data synced yet. Provide general tactical advice."
+                st.session_state.live_context = "No live data. Provide general pre-match tactical advice."
 
-        # ── Sync button with cooldown ─────────────────────────────
-        last_sync_time = st.session_state.get("last_live_sync", 0)
-        seconds_since_sync = _time.time() - last_sync_time
-        SYNC_COOLDOWN = 300  # 5 min between API hits
-
-        sync_ready = seconds_since_sync >= SYNC_COOLDOWN
-        if sync_ready:
-            btn_label = "🔄 Sync Live Data (All Competitions)"
-        else:
-            mins_left = max(1, int((SYNC_COOLDOWN - seconds_since_sync) / 60))
-            btn_label = f"🔄 Sync Live Data (cooldown: ~{mins_left} min)"
+        # Sync button — BSD has no rate limits so cooldown is just 30s (Redis TTL)
+        last_sync  = st.session_state.get("last_bsd_sync", 0)
+        secs_since = _time.time() - last_sync
+        COOLDOWN   = 30  # matches BSD Redis TTL of 30s
+        sync_ready = secs_since >= COOLDOWN
+        btn_label  = ("🔄 Sync Live Data (All Competitions)"
+                      if sync_ready else
+                      f"🔄 Sync (cooldown: {max(1, int(COOLDOWN - secs_since))}s)")
 
         if st.button(btn_label, use_container_width=True, disabled=not sync_ready):
-            api_sports_key = st.secrets.get("API_SPORTS_KEY")
-            if not api_sports_key:
-                st.error("🚨 API_SPORTS_KEY is missing from Streamlit Secrets! Add it under Settings → Secrets.")
+            bsd_key = st.secrets.get("BSD_API_KEY")
+            if not bsd_key:
+                st.error("🚨 BSD_API_KEY missing from Streamlit Secrets!")
             else:
-                with st.spinner("🌐 Scanning all live fixtures across global competitions..."):
-                    headers = {
-                        "x-apisports-key": api_sports_key,
-                        "x-apisports-host": "v3.football.api-sports.io"
-                    }
+                with st.spinner("🌐 Scanning all live fixtures worldwide..."):
+                    hdrs = {"Authorization": f"Token {bsd_key}"}
                     try:
-                        # Single API call — fetches ALL live matches worldwide (UCL, EPL, La Liga, etc.)
-                        res = _requests.get(
-                            "https://v3.football.api-sports.io/fixtures?live=all",
-                            headers=headers,
-                            timeout=12
+                        # BSD Live window: GET /api/v2/events/live/
+                        # Response: {"count": N, "events": [...]}
+                        # Each event: home_team, away_team, home_score, away_score,
+                        #             current_minute, league_name, status
+                        res = _req.get(
+                            "https://sports.bzzoiro.com/api/v2/events/live/",
+                            headers=hdrs, timeout=12
                         )
-                        st.session_state.last_live_sync = _time.time()
+                        st.session_state.last_bsd_sync = _time.time()
 
-                        if res.status_code == 429:
-                            st.error("🚨 Daily API quota exhausted. Cache will be used until midnight UTC resets your limit.")
-                        elif res.status_code != 200:
-                            st.error(f"🚨 API returned status {res.status_code}. Verify your API key in Streamlit Secrets.")
+                        if res.status_code != 200:
+                            st.error(f"🚨 BSD API error {res.status_code}. Check your key.")
                         else:
-                            live_data = res.json().get("response", [])
+                            live_data   = res.json().get("events", [])
                             match_found = False
 
                             for match in live_data:
-                                home_name  = match["teams"]["home"]["name"]
-                                away_name  = match["teams"]["away"]["name"]
-                                home_id    = match["teams"]["home"]["id"]
-                                away_id    = match["teams"]["away"]["id"]
+                                home_name  = match.get("home_team", "")
+                                away_name  = match.get("away_team", "")
 
-                                # Fuzzy match — works for partial names and alternate spellings
-                                my_team_hits  = (chat_my_team.lower() in home_name.lower() or
-                                                 chat_my_team.lower() in away_name.lower() or
-                                                 home_name.lower() in chat_my_team.lower() or
-                                                 away_name.lower() in chat_my_team.lower())
-                                opp_team_hits = (chat_opp_team.lower() in home_name.lower() or
-                                                 chat_opp_team.lower() in away_name.lower() or
-                                                 home_name.lower() in chat_opp_team.lower() or
-                                                 away_name.lower() in chat_opp_team.lower())
+                                # Fuzzy match: works even if BSD name differs slightly
+                                my_hit  = (chat_my_team.lower()  in home_name.lower() or
+                                           home_name.lower() in chat_my_team.lower()  or
+                                           chat_my_team.lower()  in away_name.lower() or
+                                           away_name.lower() in chat_my_team.lower())
+                                opp_hit = (chat_opp_team.lower() in home_name.lower() or
+                                           home_name.lower() in chat_opp_team.lower() or
+                                           chat_opp_team.lower() in away_name.lower() or
+                                           away_name.lower() in chat_opp_team.lower())
 
-                                if my_team_hits and opp_team_hits:
-                                    minute      = match["fixture"]["status"].get("elapsed") or 0
-                                    home_goals  = match["goals"]["home"] if match["goals"]["home"] is not None else 0
-                                    away_goals  = match["goals"]["away"] if match["goals"]["away"] is not None else 0
-                                    competition = match.get("league", {}).get("name", "Unknown Competition")
-                                    venue       = match.get("fixture", {}).get("venue", {}).get("name", "Unknown Venue")
-                                    status_long = match["fixture"]["status"].get("long", "Live")
+                                if my_hit and opp_hit:
+                                    minute      = match.get("current_minute") or 0
+                                    home_goals  = match.get("home_score") or 0
+                                    away_goals  = match.get("away_score") or 0
+                                    competition = match.get("league_name", "Unknown Competition")
+                                    status_txt  = match.get("status", "inprogress")
 
-                                    # Persist to cache
                                     entry = {
-                                        "fetched_at":  _time.time(),
-                                        "match_found": True,
-                                        "home_name":   home_name,
-                                        "away_name":   away_name,
-                                        "home_goals":  home_goals,
-                                        "away_goals":  away_goals,
-                                        "minute":      minute,
-                                        "competition": competition,
-                                        "venue":       venue,
-                                        "status":      status_long,
+                                        "fetched_at": _time.time(), "match_found": True,
+                                        "home_name": home_name, "away_name": away_name,
+                                        "home_goals": home_goals, "away_goals": away_goals,
+                                        "minute": minute, "competition": competition,
                                     }
-                                    live_cache[cache_key] = entry
+                                    live_cache[ck] = entry
                                     save_live_cache(live_cache)
 
-                                    live_context_str = (
-                                        f"LIVE MATCH DATA ({competition}): "
-                                        f"Match Minute {minute}'. "
-                                        f"Current Scoreline: {home_name} {home_goals} – {away_goals} {away_name}. "
-                                        f"Venue: {venue}. Status: {status_long}."
+                                    st.session_state.live_context = (
+                                        f"LIVE ({competition}): Minute {minute}'. "
+                                        f"Score: {home_name} {home_goals} – {away_goals} {away_name}. "
+                                        f"Status: {status_txt}."
                                     )
-                                    st.session_state.live_context = live_context_str
-
                                     st.markdown(
-                                        f"""<div class='live-suggestion'>
-                                        <b>✅ LIVE: {home_name} {home_goals} – {away_goals} {away_name}</b>
-                                        &nbsp;|&nbsp; ⏱️ Minute {minute}' &nbsp;|&nbsp; 🏆 {competition}
-                                        <br><span style='font-size:12px;color:#86efac'>📍 {venue} &nbsp;·&nbsp; {status_long} &nbsp;·&nbsp; Saved to cache</span>
-                                        </div>""",
-                                        unsafe_allow_html=True,
-                                    )
+                                        f"<div class='live-suggestion'>"
+                                        f"<b>✅ LIVE: {home_name} {home_goals} – {away_goals} {away_name}</b>"
+                                        f" | ⏱️ {minute}' | 🏆 {competition}"
+                                        f"</div>", unsafe_allow_html=True)
                                     match_found = True
                                     break
 
                             if not match_found:
-                                # Cache the "no match" result too — avoids repeat API calls
-                                live_cache[cache_key] = {
-                                    "fetched_at":  _time.time(),
-                                    "match_found": False,
-                                }
+                                live_cache[ck] = {"fetched_at": _time.time(), "match_found": False}
                                 save_live_cache(live_cache)
-                                st.session_state.live_context = "No live match in progress for this fixture. Advise on pre-match / general context."
+                                st.session_state.live_context = "No live match. Provide pre-match tactical advice."
                                 st.warning(
-                                    f"⚠️ No live fixture found for **{chat_my_team}** vs **{chat_opp_team}** "
-                                    f"across any competition right now. Checked {len(live_data)} live matches worldwide."
+                                    f"⚠️ No live fixture found for **{chat_my_team}** vs **{chat_opp_team}**. "
+                                    f"Checked {len(live_data)} live matches worldwide."
                                 )
-
                     except Exception as e:
                         st.error(f"🚨 Connection error: {e}")
 
-        # ── Clear cache button (small, secondary) ─────────────────
-        if cached_entry:
-            if st.button("🗑️ Clear cached data for this fixture", key="clear_cache"):
-                live_cache.pop(cache_key, None)
+        # Clear cache button
+        if cached:
+            if st.button("🗑️ Clear cached data for this fixture", key="clear_live_cache"):
+                live_cache.pop(ck, None)
                 save_live_cache(live_cache)
                 st.session_state.pop("live_context", None)
                 st.rerun()
 
         st.markdown("---")
 
-        # ── Chat Interface ────────────────────────────────────────
+        # ── Chat Interface ────────────────────────────────────────────────
         st.markdown("### 🧠 Assistant Manager")
 
-        # Per-tab isolated chat history (keyed to the team pairing)
-        chat_session_key = f"messages__{cache_key}"
-        if chat_session_key not in st.session_state:
-            st.session_state[chat_session_key] = []
+        chat_key = f"messages__{ck}"
+        if chat_key not in st.session_state:
+            st.session_state[chat_key] = []
 
-        # Render existing messages
-        for message in st.session_state[chat_session_key]:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+        for msg in st.session_state[chat_key]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
 
-        # Chat input
         if prompt := st.chat_input(f"Ask your assistant... e.g., 'How do we beat {chat_opp_team}?'"):
-            st.session_state[chat_session_key].append({"role": "user", "content": prompt})
+            st.session_state[chat_key].append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
 
             my_roster   = players_db.get(chat_my_team, [])
             live_status = st.session_state.get("live_context", "No live data. Provide general pre-match tactical advice.")
 
-            # Build full conversation history for the AI (true multi-turn memory)
             history_text = ""
-            for msg in st.session_state[chat_session_key][:-1]:  # exclude the message just added
+            for msg in st.session_state[chat_key][:-1]:
                 role_label = "Coach" if msg["role"] == "user" else "Assistant"
                 history_text += f"{role_label}: {msg['content']}\n"
 
-            system_instruction = f"""You are an elite, world-class Assistant Football Manager AI.
-You are assisting the Head Coach of {chat_my_team}, currently facing {chat_opp_team}.
+            system_prompt = f"""You are an elite AI Assistant Football Manager.
+You are helping the Head Coach of {chat_my_team}, currently facing {chat_opp_team}.
 
 LIVE MATCH STATUS:
 {live_status}
@@ -1034,38 +899,34 @@ LIVE MATCH STATUS:
 OUR SQUAD ROSTER (Name | Position | Minutes Played | Goals+Assists):
 {json.dumps(my_roster, ensure_ascii=False)}
 
-CONVERSATION HISTORY (for context — do not repeat already-given advice):
+CONVERSATION HISTORY:
 {history_text if history_text else "This is the start of the briefing."}
 
 INSTRUCTIONS:
-- Speak directly to the Head Coach. Be concise, tactical, and professional.
-- If LIVE MATCH DATA is present, anchor ALL advice to the current scoreline and match minute.
-- If no live data, give sharp pre-match tactical advice based on known team strengths.
-- Reference ONLY players from our squad roster above. Never invent player names.
-- Keep responses focused — 3 to 6 sentences unless the coach asks for a detailed breakdown.
-- Use football terminology (press triggers, half-spaces, double pivot, low block, etc.).
+- Speak directly to the Head Coach. Be concise, tactical, professional.
+- If LIVE MATCH DATA is present, anchor ALL advice to the current score and minute.
+- If no live data, give sharp pre-match tactical advice.
+- Only reference players from our squad roster above. Never invent names.
+- Use football terminology (press triggers, half-spaces, double pivot, low block, etc.)
+- 3–6 sentences unless a detailed breakdown is requested.
 """
-
             if gemini_api_key:
                 with st.chat_message("assistant"):
-                    message_placeholder = st.empty()
+                    placeholder = st.empty()
                     try:
-                        full_prompt = f"{system_instruction}\n\nCoach's Question: {prompt}"
-                        response = ai_model.generate_content(full_prompt)
+                        response       = ai_model.generate_content(f"{system_prompt}\n\nCoach: {prompt}")
                         assistant_reply = response.text
-                        message_placeholder.markdown(assistant_reply)
-                        st.session_state[chat_session_key].append({"role": "assistant", "content": assistant_reply})
+                        placeholder.markdown(assistant_reply)
+                        st.session_state[chat_key].append({"role": "assistant", "content": assistant_reply})
                     except Exception as e:
-                        message_placeholder.error(f"🚨 AI error: {e}")
+                        placeholder.error(f"🚨 Gemini error: {e}")
             else:
-                st.error("🚨 GEMINI_API_KEY is missing from Streamlit Secrets. The AI chat requires it.")
+                st.error("🚨 GEMINI_API_KEY missing from Streamlit Secrets.")
 
-        # Reset chat button
-        if st.session_state.get(chat_session_key):
+        if st.session_state.get(chat_key):
             if st.button("🔁 Reset Chat", key="reset_chat"):
-                st.session_state[chat_session_key] = []
+                st.session_state[chat_key] = []
                 st.rerun()
-
 
 else:
     st.warning("No teams loaded. Please check your teams.json file.")
