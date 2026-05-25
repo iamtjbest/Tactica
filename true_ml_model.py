@@ -1,116 +1,167 @@
-import requests
-import json
-import os
-import time
+import json, requests, os, time
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 import joblib
+from datetime import datetime, timedelta
 
-# Secure API Key
-API_KEY = os.environ.get("API_SPORTS_KEY")
-HEADERS = {
-    "x-apisports-key": API_KEY,
-    "x-apisports-host": "v3.football.api-sports.io"
-}
-
-# The 17 formations the Streamlit app uses
-FORMATIONS_MAP = {
-    "3-4-3": 0, "3-5-2": 1, "3-4-1-2": 2, "3-2-4-1": 3, "3-4-2-1": 4, "3-3-1-3": 5,
-    "4-2-3-1": 6, "4-3-3": 7, "4-4-2": 8, "4-4-2 Diamond": 9, "4-1-4-1": 10,
-    "4-3-2-1": 11, "4-2-2-2": 12, "5-3-2": 13, "5-4-1": 14, "5-2-2-1": 15, "5-2-3": 16
-}
-
-# ============================================================
-# API BUDGET for this script:
-#   1 request  — fetch fixtures list
-#   up to 20   — lineup fetches (one per fixture, capped at 20)
-#   TOTAL: ≤ 21 requests
+# ================================================================
+# BSD API v2 — true_ml_model.py
+# Docs: https://sports.bzzoiro.com/docs/v2/
 #
-# auto_updater.py uses 20 requests.
-# Combined daily spend: ≤ 41 / 100 — well within the free limit.
-# ============================================================
-MAX_LINEUP_FETCHES = 20
+# Endpoints used:
+#   GET /api/v2/events/?status=finished&league_id={id}&limit=50
+#       → recent finished Premier League matches
+#       Response: {"count":N,"results":[event objects]}
+#       Event fields: id, home_team_id, away_team_id,
+#                     home_team, away_team, home_score, away_score
+#
+#   GET /api/v2/events/{id}/lineups/
+#       → formation used by each team
+#       Response: {
+#           "lineup_status": "confirmed|predicted|unavailable",
+#           "lineups": {
+#               "home": {"formation": "4-3-3", ...},
+#               "away": {"formation": "4-4-2", ...}
+#           }
+#       }
+#       IMPORTANT: when lineup_status == "unavailable", lineups == null
+#
+# No rate limits on BSD free plan.
+# BSD Premier League league_id = 17 (verify at /api/v2/leagues/?country=England)
+# ================================================================
+
+BSD_KEY = os.environ.get("BSD_API_KEY")
+HEADERS = {"Authorization": f"Token {BSD_KEY}"}
+BASE    = "https://sports.bzzoiro.com/api/v2"
+
+BSD_PL_LEAGUE_ID = 17  # Premier League — verify at GET /api/v2/leagues/?country=England
+
+FORMATIONS_MAP = {
+    "3-4-3": 0,  "3-5-2": 1,  "3-4-1-2": 2, "3-2-4-1": 3, "3-4-2-1": 4,
+    "3-3-1-3": 5,"4-2-3-1": 6,"4-3-3": 7,   "4-4-2": 8,   "4-4-2 Diamond": 9,
+    "4-1-4-1": 10,"4-3-2-1": 11,"4-2-2-2": 12,"5-3-2": 13, "5-4-1": 14,
+    "5-2-2-1": 15,"5-2-3": 16
+}
+
+
+def get(url, params=None):
+    try:
+        r = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        return r
+    except Exception as e:
+        print(f"  🚨 Network error: {e}")
+        return None
+
+
+def extract_formation(event_id, is_home):
+    """
+    Fetch lineup for an event and return the formation for home or away side.
+    Returns None if lineup is unavailable or formation not in our known list.
+
+    Docs: GET /api/v2/events/{id}/lineups/
+    Response when confirmed/predicted:
+      {
+        "lineup_status": "confirmed",
+        "lineups": {
+          "home": {"formation": "4-3-3", ...},
+          "away": {"formation": "4-4-2", ...}
+        }
+      }
+    Response when unavailable:
+      {"lineup_status": "unavailable", "lineups": null}
+    """
+    r = get(f"{BASE}/events/{event_id}/lineups/")
+    time.sleep(0.2)
+    if not r or r.status_code != 200:
+        return None
+
+    data = r.json()
+    status = data.get("lineup_status", "unavailable")
+
+    # lineups is null when unavailable — must check before accessing
+    if status == "unavailable" or data.get("lineups") is None:
+        return None
+
+    side     = "home" if is_home else "away"
+    side_obj = data["lineups"].get(side, {})
+    formation = side_obj.get("formation", "")
+
+    return formation if formation in FORMATIONS_MAP else None
 
 
 def harvest_and_train():
-    print("🧠 Booting up the True ML Harvester...")
+    print("🧠 BSD ML Trainer starting...")
 
-    # --- 1. Fetch completed Premier League fixtures ---
-    url = "https://v3.football.api-sports.io/fixtures?league=39&season=2024&status=FT"
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
-    except requests.exceptions.RequestException as e:
-        print(f"🚨 Network error fetching fixtures: {e}")
+    if not BSD_KEY:
+        print("🚨 BSD_API_KEY not set. Aborting.")
         return
 
-    if response.status_code != 200:
-        print(f"🚨 API Connection Failed! Status: {response.status_code}")
+    # ── Fetch last 30 days of finished PL matches ─────────────────────────
+    # Docs: GET /api/v2/events/?status=finished&league_id=17&limit=50
+    # Results ordered newest-first by event_date
+    date_to   = datetime.utcnow().strftime("%Y-%m-%d")
+    date_from = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+
+    print(f"📡 Fetching finished PL matches {date_from} → {date_to}...")
+    r = get(f"{BASE}/events/", {
+        "league_id": BSD_PL_LEAGUE_ID,
+        "status":    "finished",
+        "date_from": date_from,
+        "date_to":   date_to,
+        "limit":     50,
+    })
+
+    if not r or r.status_code != 200:
+        print(f"🚨 API error: {r.status_code if r else 'no response'}")
         return
 
-    fixtures = response.json().get('response', [])
-    print(f"📡 Found {len(fixtures)} completed matches. Fetching lineups for up to {MAX_LINEUP_FETCHES}...")
+    # Response shape: {"count":N, "next":..., "previous":..., "results":[...]}
+    fixtures = r.json().get("results", [])
+    print(f"📊 Found {len(fixtures)} finished matches. Extracting formations...")
 
     historical_data = []
-    lineup_fetches = 0
 
-    # --- 2. Fetch lineups for a capped batch of fixtures ---
-    for fixture in fixtures[:MAX_LINEUP_FETCHES]:
-        fixture_id  = fixture['fixture']['id']
-        home_team   = fixture['teams']['home']['name']
-        away_team   = fixture['teams']['away']['name']
-        home_goals  = fixture['goals']['home']
-        away_goals  = fixture['goals']['away']
+    for fix in fixtures:
+        event_id   = fix["id"]
+        home_score = fix.get("home_score") or 0
+        away_score = fix.get("away_score") or 0
+        home_team  = fix.get("home_team", "?")
+        away_team  = fix.get("away_team", "?")
 
-        lineup_url = f"https://v3.football.api-sports.io/fixtures/lineups?fixture={fixture_id}"
-        try:
-            lineup_res = requests.get(lineup_url, headers=HEADERS, timeout=15)
-            lineup_fetches += 1
-        except requests.exceptions.RequestException as e:
-            print(f"⚠️  Network error for fixture {fixture_id}: {e}. Skipping.")
-            continue
+        home_form = extract_formation(event_id, is_home=True)
+        away_form = extract_formation(event_id, is_home=False)
 
-        if lineup_res.status_code == 429:
-            print(f"🚨 RATE LIMITED after {lineup_fetches} lineup fetches. Stopping early.")
-            break
+        if home_form:
+            historical_data.append({
+                "Formation":    FORMATIONS_MAP[home_form],
+                "Team_Attack":  80, "Team_Defense": 80,
+                "Opp_Attack":   80, "Opp_Defense":  80,
+                "Win": 1 if home_score > away_score else 0
+            })
+        if away_form:
+            historical_data.append({
+                "Formation":    FORMATIONS_MAP[away_form],
+                "Team_Attack":  80, "Team_Defense": 80,
+                "Opp_Attack":   80, "Opp_Defense":  80,
+                "Win": 1 if away_score > home_score else 0
+            })
 
-        lineup_data = lineup_res.json().get('response', [])
+        if home_form or away_form:
+            print(f"  ✅ {home_team} ({home_form or '?'}) vs {away_team} ({away_form or '?'})")
 
-        if len(lineup_data) == 2:
-            home_form = lineup_data[0].get('formation', '')
-            away_form = lineup_data[1].get('formation', '')
-
-            if home_form in FORMATIONS_MAP and away_form in FORMATIONS_MAP:
-                historical_data.append({
-                    'Formation': FORMATIONS_MAP[home_form],
-                    'Team_Attack': 80, 'Team_Defense': 80,
-                    'Opp_Attack': 80, 'Opp_Defense': 80,
-                    'Win': 1 if home_goals > away_goals else 0
-                })
-                historical_data.append({
-                    'Formation': FORMATIONS_MAP[away_form],
-                    'Team_Attack': 80, 'Team_Defense': 80,
-                    'Opp_Attack': 80, 'Opp_Defense': 80,
-                    'Win': 1 if away_goals > home_goals else 0
-                })
-                print(f"  ✅ Logged: {home_team} ({home_form}) vs {away_team} ({away_form})")
-
-        time.sleep(0.3)  # polite delay between requests
-
-    print(f"📊 Total lineup API requests used: {lineup_fetches}")
-
-    # --- 3. Train the model ---
+    # ── Train and save model ──────────────────────────────────────────────
     if historical_data:
         df = pd.DataFrame(historical_data)
-        print(f"🤖 Training Random Forest on {len(df)} match records...")
+        print(f"\n🤖 Training RandomForest on {len(df)} records...")
         model = RandomForestClassifier(n_estimators=100, random_state=42)
         model.fit(
-            df[['Formation', 'Team_Attack', 'Team_Defense', 'Opp_Attack', 'Opp_Defense']],
-            df['Win']
+            df[["Formation","Team_Attack","Team_Defense","Opp_Attack","Opp_Defense"]],
+            df["Win"]
         )
-        joblib.dump(model, 'tactical_model.pkl')
-        print("🏆 tactical_model.pkl saved! The AI brain is ready.")
+        joblib.dump(model, "tactical_model.pkl")
+        print("🏆 tactical_model.pkl saved!")
     else:
-        print("⚠️  No valid formation data found. Model not updated.")
+        print("⚠️  No formation data found — model not updated.")
 
 
 if __name__ == "__main__":
