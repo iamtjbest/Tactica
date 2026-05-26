@@ -4,32 +4,35 @@ import json, requests, os, time
 # BSD API v2 — auto_updater.py
 # Docs: https://sports.bzzoiro.com/docs/v2/
 #
-# Endpoints used:
-#   GET /api/v2/players/?team_id={id}&limit=50
-#       → player name + position (G/D/M/F)
-#   GET /api/v2/teams/{id}/fixtures/?status=finished&limit=5
-#       → last 5 match IDs for the team
-#   GET /api/v2/events/{id}/player-stats/
-#       → per-player minutes_played, goals, goal_assist
+# Auth header : Authorization: Token YOUR_KEY
+# Base URL    : https://sports.bzzoiro.com/api/v2/
 #
-# No rate limits on BSD free plan.
-# Cost: ~7 calls per team × 20 teams = ~140 calls total (no limit)
-#
-# NOTE: BSD Team IDs may differ from placeholders below.
-#   To verify: GET /api/v2/teams/?league_id=17  (17 = Premier League on BSD)
-#   Or run the helper: python auto_updater.py --lookup
+# Calls per team:
+#   1  x GET /api/v2/teams/{id}/squad/           → names + positions
+#   1  x GET /api/v2/events/?team_id&status=finished&limit=5 → last 5 match IDs
+#   5  x GET /api/v2/events/{id}/player-stats/   → mins + goals + assists
+#   ─────────────────────────────────────────────────────────────
+#   7 calls per team × 20 teams = 140 calls total
+#   BSD free plan has NO rate limit — this is completely safe.
 # ================================================================
 
-BSD_KEY = os.environ.get("BSD_API_KEY")
-HEADERS = {"Authorization": f"Token {BSD_KEY}"}
-BASE    = "https://sports.bzzoiro.com/api/v2"
+BSD_KEY  = os.environ.get("BSD_API_KEY")
+HEADERS  = {"Authorization": f"Token {BSD_KEY}"}
+BASE     = "https://sports.bzzoiro.com/api/v2"
 
-# BSD position codes from docs
+# ----------------------------------------------------------------
+# BSD position codes (confirmed from docs squad response):
+#   "G" → GK, "D" → DF, "M" → MF, "F" → FW
+# ----------------------------------------------------------------
 POS_MAP = {"G": "GK", "D": "DF", "M": "MF", "F": "FW"}
 
 # ----------------------------------------------------------------
-# BSD Team IDs — verify with GET /api/v2/teams/?league_id=17
-# Docs example confirms Man City = 267
+# BSD Team IDs for Premier League clubs.
+# To verify / find IDs run once:
+#   curl -H "Authorization: Token YOUR_KEY" \
+#        "https://sports.bzzoiro.com/api/v2/teams/?league_id=17&limit=20"
+# Then match "name" → "id" and update this dict.
+# Premier League league_id = 17 (confirmed from BSD docs example)
 # ----------------------------------------------------------------
 BSD_TEAM_IDS = {
     "Manchester City": 267,
@@ -54,7 +57,7 @@ BSD_TEAM_IDS = {
     "Ipswich":         40,
 }
 
-# Static fallback ratings (no API call needed)
+# Static fallback ratings (no API needed — update manually each season)
 TEAM_RATINGS = {
     "Manchester City": {"Attack": 92, "Defense": 88},
     "Arsenal":         {"Attack": 88, "Defense": 90},
@@ -80,25 +83,16 @@ TEAM_RATINGS = {
 
 
 def get(url, params=None):
-    """Safe GET wrapper with error handling."""
+    """Simple GET helper with error handling."""
     try:
         r = requests.get(url, headers=HEADERS, params=params, timeout=15)
-        return r
-    except Exception as e:
-        print(f"    🚨 Network error: {e}")
+        if r.status_code == 200:
+            return r.json()
+        print(f"  ⚠️  {url} → HTTP {r.status_code}")
         return None
-
-
-def lookup_team_ids():
-    """Helper: print BSD IDs for all PL teams. Run once to verify IDs."""
-    print("🔍 Looking up Premier League team IDs on BSD...")
-    r = get(f"{BASE}/teams/", {"league_id": 17, "limit": 30})
-    if r and r.status_code == 200:
-        teams = r.json().get("results", [])
-        for t in teams:
-            print(f"  {t['name']:30s} → id = {t['id']}")
-    else:
-        print("  ❌ Failed to fetch teams list")
+    except Exception as e:
+        print(f"  🚨 {url} → {e}")
+        return None
 
 
 def fetch_latest_stats():
@@ -113,64 +107,70 @@ def fetch_latest_stats():
     for team_name, team_id in BSD_TEAM_IDS.items():
         print(f"\n📡 Processing {team_name} (BSD id={team_id})...")
 
-        # ── Step 1: Get squad (names + positions) ────────────────────────
-        # Docs: GET /api/v2/players/?team_id={id}&limit=50
-        # Response shape: {"count":N, "results":[{"id":..,"name":..,"position":"M",...}]}
-        r = get(f"{BASE}/players/", {"team_id": team_id, "limit": 50})
-        if not r or r.status_code != 200:
-            print(f"  ⚠️  Could not fetch players list (status {r.status_code if r else 'N/A'})")
+        # ── Step 1: Fetch squad (names + positions) ───────────────────────
+        # Docs: GET /api/v2/teams/{id}/squad/
+        # Response: {"team_id": N, "count": N, "players": [{id, name,
+        #            short_name, position, jersey_number, nationality, dob}]}
+        squad_data = get(f"{BASE}/teams/{team_id}/squad/")
+        if not squad_data:
+            print(f"  ⚠️  No squad data — skipping {team_name}")
             players_db[team_name] = []
             continue
 
-        player_list = r.json().get("results", [])
-        # Map player_id → {Name, Pos, Min:0, G_A:0}
-        player_map = {}
-        for p in player_list:
-            raw_pos = str(p.get("position") or "M")
-            player_map[p["id"]] = {
-                "Name": p.get("name") or p.get("short_name") or "Unknown",
+        players_by_id = {}
+        for p in squad_data.get("players", []):
+            pid = p["id"]
+            raw_pos = p.get("position", "M")  # G / D / M / F
+            players_by_id[pid] = {
+                "Name": p.get("name") or p.get("short_name", "Unknown"),
                 "Pos":  POS_MAP.get(raw_pos, "MF"),
                 "Min":  0,
                 "G_A":  0,
             }
-        print(f"  👥 {len(player_map)} players found")
 
-        # ── Step 2: Get last 5 finished fixtures for this team ────────────
-        # Docs: GET /api/v2/teams/{id}/fixtures/?status=finished&limit=5
-        # Response: same shape as events list (results array of event objects)
-        r2 = get(f"{BASE}/teams/{team_id}/fixtures/",
-                 {"status": "finished", "limit": 5})
-        fixture_ids = []
-        if r2 and r2.status_code == 200:
-            fixtures = r2.json().get("results", [])
-            fixture_ids = [f["id"] for f in fixtures]
-            print(f"  📅 {len(fixture_ids)} recent fixtures to scan for stats")
-        else:
-            print(f"  ⚠️  Could not fetch fixtures — using positions only (no stats)")
+        print(f"  ✅ {len(players_by_id)} players in squad")
+        time.sleep(0.2)
 
-        # ── Step 3: Aggregate player stats across those fixtures ──────────
+        # ── Step 2: Fetch last 5 finished matches for this team ───────────
+        # Docs: GET /api/v2/events/
+        # Params: team_id, status=finished, limit=5
+        # Response: {"count": N, "results": [event_objects]}
+        # event object: id, home_team_id, away_team_id, home_score,
+        #               away_score, league_id, status, ...
+        events_data = get(
+            f"{BASE}/events/",
+            params={"team_id": team_id, "status": "finished", "limit": 5}
+        )
+        recent_match_ids = []
+        if events_data:
+            for ev in events_data.get("results", []):
+                recent_match_ids.append(ev["id"])
+        print(f"  ✅ {len(recent_match_ids)} recent finished matches found")
+        time.sleep(0.2)
+
+        # ── Step 3: Fetch player stats from each recent match ─────────────
         # Docs: GET /api/v2/events/{id}/player-stats/
-        # Response: {"event_id":..,"count":..,"player_stats":[
-        #   {"player_id":..,"team_id":..,"minutes_played":..,"goals":..,"goal_assist":..}
-        # ]}
-        for fid in fixture_ids:
-            r3 = get(f"{BASE}/events/{fid}/player-stats/")
-            time.sleep(0.2)
-            if not r3 or r3.status_code != 200:
+        # Response: {"event_id": N, "count": N, "player_stats": [
+        #   {player_id, team_id, minutes_played, goals, goal_assist, ...}]}
+        for match_id in recent_match_ids:
+            ps_data = get(f"{BASE}/events/{match_id}/player-stats/")
+            if not ps_data:
                 continue
-            for ps in r3.json().get("player_stats", []):
+            for ps in ps_data.get("player_stats", []):
                 pid = ps.get("player_id")
-                # Only count stats for players on this team
+                # Only count stats for players on THIS team
                 if ps.get("team_id") != team_id:
                     continue
-                if pid in player_map:
-                    player_map[pid]["Min"] += ps.get("minutes_played") or 0
-                    player_map[pid]["G_A"] += (ps.get("goals") or 0) + (ps.get("goal_assist") or 0)
+                if pid in players_by_id:
+                    players_by_id[pid]["Min"] += ps.get("minutes_played") or 0
+                    players_by_id[pid]["G_A"] += (
+                        (ps.get("goals") or 0) + (ps.get("goal_assist") or 0)
+                    )
+            time.sleep(0.2)
 
-        roster = list(player_map.values())
+        roster = list(players_by_id.values())
         players_db[team_name] = roster
-        print(f"  ✅ {len(roster)} players saved for {team_name}")
-        time.sleep(0.3)
+        print(f"  ✅ {team_name} — {len(roster)} players with stats")
 
     # ── Save outputs ──────────────────────────────────────────────────────
     with open("players.json", "w", encoding="utf-8") as f:
@@ -183,8 +183,4 @@ def fetch_latest_stats():
 
 
 if __name__ == "__main__":
-    import sys
-    if "--lookup" in sys.argv:
-        lookup_team_ids()
-    else:
-        fetch_latest_stats()
+    fetch_latest_stats()
