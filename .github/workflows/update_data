@@ -1,47 +1,42 @@
-name: Weekly Tactical Data Update (BSD)
+name: Weekly Data Harvester and ML Retrainer
 
 on:
   schedule:
-    # Every Monday 03:00 UTC — BSD has no rate limits so daily is also safe,
-    # but weekly is enough; squad data rarely changes mid-week.
+    # Runs exactly once a week (Every Monday morning at 03:00 UTC)
     - cron: '0 3 * * 1'
-  workflow_dispatch:  # keep manual trigger
+  workflow_dispatch: # Allows you to trigger this pipeline manually via GitHub UI if needed
 
 jobs:
-  update-stats:
+  harvester_and_retrainer:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Check out Repository Codebase
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python Environment
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-python-version: '3.10'
+          cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install System Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas scikit-learn joblib
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # Step 1 — fetch player squads + stats per team (~140 BSD calls, no limit)
-      - name: Fetch player/squad data
+      - name: Run BSD Data Synchronization
         env:
           BSD_API_KEY: ${{ secrets.BSD_API_KEY }}
         run: python auto_updater.py
 
-      # Step 2 — retrain ML model on recent fixture formations
-      - name: Retrain ML model
-        env:
-          BSD_API_KEY: ${{ secrets.BSD_API_KEY }}
+      - name: Retrain Tactical Machine Learning Model
         run: python true_ml_model.py
 
-      # Step 3 — commit all updated files in one push
-      - name: Commit and push updates
+      - name: Commit and Push Updated Data Matrices
         run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add players.json teams.json tactical_model.pkl
-          git diff --staged --quiet || git commit -m "🤖 Weekly BSD update: squads + ML retrain"
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions Runner"
+          git add teams.json players.json tactical_model.pkl
+          git diff-index --quiet HEAD || git commit -m "automation: weekly structural squad synchronization [skip ci]"
           git push
