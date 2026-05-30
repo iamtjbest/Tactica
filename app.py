@@ -731,7 +731,9 @@ if app_mode == "🤖 Pre-Match Auto-Tactics":
                             f"<span class='stat-text'>⏱ {p.get('Min',0)} mins &nbsp;⚽ {ga} G+A</span>"
                             f"</div>", unsafe_allow_html=True)
                 else:
-                    st.info(f"No player data loaded for '{my_team}'. Run the weekly auto-updater or add data to players.json.")
+                    st.info(f"No player data loaded for **{my_team}**. "
+                            f"Go to **Coach's Sandbox**, select {my_team}, and click "
+                            f"'Fetch Squad from BSD' — it loads instantly and saves for all modules.")
 
 # =============================================================================
 # MODULE 2: OPPONENT ANALYSIS
@@ -782,6 +784,8 @@ elif app_mode == "📊 Pre-Match Opponent Analysis":
 # MODULE 3: COACH'S SANDBOX
 # =============================================================================
 elif app_mode == "🧠 Coach's Sandbox":
+    import requests as _req, time as _time
+
     st.markdown("## 🧠 Coach's Sandbox")
     st.write("Pick your formation, draft your XI, and get an AI second opinion.")
 
@@ -789,28 +793,124 @@ elif app_mode == "🧠 Coach's Sandbox":
     with col1: my_team  = st.selectbox("Your Team", DROPDOWN_TEAMS, key="sb_my")
     with col2: opp_team = st.selectbox("Opponent",  DROPDOWN_TEAMS, index=1, key="sb_opp")
 
+    # ── On-demand squad fetcher for teams not in players.json ────────────────
+    SQUAD_CACHE = "squad_cache.json"
+
+    def load_squad_cache():
+        try: return json.load(open(SQUAD_CACHE, encoding="utf-8"))
+        except: return {}
+
+    def save_squad_cache(d):
+        try: json.dump(d, open(SQUAD_CACHE,"w",encoding="utf-8"), indent=2)
+        except: pass
+
+    SPEC_MAP = {
+        "GK":"GK","CB":"DF","RB":"DF","LB":"DF","RWB":"DF","LWB":"DF",
+        "CM":"MF","CDM":"MF","DM":"MF","CAM":"MF","AM":"MF",
+        "RM":"FW","LM":"FW","RW":"FW","LW":"FW","RWF":"FW","LWF":"FW",
+        "ST":"FW","CF":"FW","SS":"FW",
+    }
+    GEN_MAP = {"G":"GK","D":"DF","M":"MF","F":"FW"}
+
+    def fetch_squad_on_demand(team_name, api_key):
+        """
+        Fetch squad from BSD for any team not in players.json.
+        Caches to squad_cache.json for 7 days to avoid repeat calls.
+        Uses GET /api/v2/players/?team_id={id}&limit=100
+        """
+        cache = load_squad_cache()
+        entry = cache.get(team_name, {})
+        age   = _time.time() - entry.get("fetched_at", 0)
+        if entry and age < 604800:  # 7-day cache
+            return entry.get("players", [])
+
+        # Step 1: resolve team_id by name
+        team_id, _ = bsd_find_team_id(team_name, api_key)
+        if not team_id:
+            return []
+
+        # Step 2: fetch players (has specific_position)
+        hdrs = {"Authorization": f"Token {api_key}"}
+        try:
+            r = _req.get(f"{BSD_BASE}/players/",
+                         headers=hdrs,
+                         params={"team_id": team_id, "limit": 100},
+                         timeout=12)
+            if r.status_code != 200:
+                return []
+        except:
+            return []
+
+        roster = []
+        for p in r.json().get("results", []):
+            name = p.get("name") or p.get("short_name","")
+            if not name or name.strip() in ("","None","null"):
+                continue
+            spec = str(p.get("specific_position","")).strip().upper()
+            gen  = str(p.get("position","M")).strip().upper()
+            pos  = SPEC_MAP.get(spec) or GEN_MAP.get(gen, "MF")
+            roster.append({
+                "Name":    name.strip(),
+                "Pos":     pos,
+                "SpecPos": spec or gen,
+                "Min":     0,
+                "G_A":     0,
+            })
+
+        cache[team_name] = {"fetched_at": _time.time(), "players": roster}
+        save_squad_cache(cache)
+
+        # Also write into players_db so modules 1 & 5 benefit immediately
+        players_db[team_name] = roster
+        try:
+            with open("players.json","w",encoding="utf-8") as f:
+                json.dump(players_db, f, indent=2, ensure_ascii=False)
+        except:
+            pass
+
+        return roster
+
+    # ── Resolve roster for selected team ─────────────────────────────────────
+    api_key    = st.secrets.get("BSD_API_KEY","")
+    actual_key = my_team
+    roster     = []
+
+    if my_team in players_db:
+        roster = [p for p in players_db[my_team]
+                  if p.get("Name") and str(p["Name"]).strip() not in ("","None","null")]
+    else:
+        # Try fuzzy match in existing data first
+        m = difflib.get_close_matches(my_team, players_db.keys(), n=1, cutoff=0.6)
+        if m:
+            actual_key = m[0]
+            roster = [p for p in players_db[actual_key]
+                      if p.get("Name") and str(p["Name"]).strip() not in ("","None","null")]
+
+    # If still empty, offer on-demand BSD fetch
+    if not roster:
+        if api_key:
+            st.info(f"ℹ️ No local data for **{my_team}**. Click below to fetch their squad from BSD now.")
+            if st.button(f"📥 Fetch {my_team} Squad from BSD", key="fetch_squad_btn"):
+                with st.spinner(f"Fetching {my_team} squad from BSD API..."):
+                    roster = fetch_squad_on_demand(my_team, api_key)
+                if roster:
+                    st.success(f"✅ {len(roster)} players loaded for {my_team}!")
+                    st.rerun()
+                else:
+                    st.error(f"🚨 Could not find {my_team} in BSD. Try a slightly different spelling.")
+        else:
+            st.warning(f"No player data for {my_team} and BSD_API_KEY not set. Add it to Streamlit Secrets.")
+
     if my_team == opp_team:
         st.error("🚨 A team cannot face itself!")
-    else:
+    elif roster:
+        roster_names = [p["Name"] for p in roster]
+
         fc_col, sq_col = st.columns(2)
         with fc_col:
             coach_form = st.selectbox("Your Preferred Formation", list(formations_map.values()))
-
-        roster_names, actual_key = [], my_team
-        if my_team in players_db:
-            roster_names = [p["Name"] for p in players_db[my_team]]
-        else:
-            m = difflib.get_close_matches(my_team, players_db.keys(), n=1, cutoff=0.6)
-            if m:
-                actual_key   = m[0]
-                roster_names = [p["Name"] for p in players_db[actual_key]]
-
         with sq_col:
-            if roster_names:
-                coach_xi = st.multiselect("Draft Your Starting XI (max 11)", roster_names, max_selections=11)
-            else:
-                st.info(f"No player data for {my_team}. Run the weekly updater or add manually.")
-                coach_xi = []
+            coach_xi = st.multiselect("Draft Your Starting XI (max 11)", roster_names, max_selections=11)
 
         if st.button("⚙️ Analyze My Gameplan", use_container_width=True, type="primary"):
             if len(coach_xi) < 11:
@@ -828,10 +928,15 @@ elif app_mode == "🧠 Coach's Sandbox":
             if coach_xi:
                 st.markdown("### 👕 Your Drafted XI")
                 for name in coach_xi:
-                    p_data = next((p for p in players_db.get(actual_key,[]) if p["Name"]==name), None)
-                    pos    = get_primary_pos(p_data["Pos"]) if p_data else "?"
-                    ga     = p_data.get("G_A",0) if p_data else 0
-                    mins   = p_data.get("Min",0) if p_data else 0
+                    p_data = next((p for p in roster if p["Name"] == name), None)
+                    # Use SpecPos badge if informative, else fall back to resolved Pos
+                    if p_data:
+                        spec  = str(p_data.get("SpecPos","")).strip()
+                        pos   = spec if spec and spec.upper() not in ("G","D","M","F") else p_data.get("Pos","?")
+                        ga    = p_data.get("G_A", 0)
+                        mins  = p_data.get("Min", 0)
+                    else:
+                        pos, ga, mins = "?", 0, 0
                     st.markdown(
                         f"<div class='player-card'>"
                         f"<span><span class='pos-badge'>{pos}</span>{name}</span>"
