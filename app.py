@@ -1207,7 +1207,7 @@ elif app_mode == "🏆 World Cup Scout":
         "Argentina", "France", "England", "Brazil", "Belgium", "Netherlands", "Portugal",
         "Spain", "Italy", "Croatia", "United States", "Mexico", "Germany", "Morocco",
         "Switzerland", "Uruguay", "Colombia", "Senegal", "Japan", "South Korea",
-        "Nigeria", "Ivory Coast", "Ghana", "Cameroon", "Canada", "Australia", "Ecuador", "South Africa"
+        "Nigeria", "Ivory Coast", "Ghana", "Cameroon", "Canada", "Australia", "Ecuador"
     ])
 
     # Merge with any nations already cached in your teams.json
@@ -1215,9 +1215,9 @@ elif app_mode == "🏆 World Cup Scout":
 
     col1, col2 = st.columns(2)
     with col1:
-        home_team = st.selectbox("🏠 Your Nation", NATION_DROPDOWN, index=NATION_DROPDOWN.index("Portugal") if "Portugal" in NATION_DROPDOWN else 0)
+        home_team = st.selectbox("🏠 Your Nation", NATION_DROPDOWN, index=NATION_DROPDOWN.index("Nigeria") if "Nigeria" in NATION_DROPDOWN else 0)
     with col2:
-        away_team = st.selectbox("✈️ Opponent Nation", NATION_DROPDOWN, index=NATION_DROPDOWN.index("France") if "France" in NATION_DROPDOWN else 1)
+        away_team = st.selectbox("✈️ Opponent Nation", NATION_DROPDOWN, index=NATION_DROPDOWN.index("South Africa") if "South Africa" in NATION_DROPDOWN else 1)
         
     st.markdown("---")
 
@@ -1232,31 +1232,54 @@ elif app_mode == "🏆 World Cup Scout":
         try: json.dump(d, open(NAT_FORM_CACHE,"w",encoding="utf-8"), indent=2)
         except: pass
 
+    def get_strict_nation_id(team_name, api_key):
+        """Strictly searches for the senior men's team, filtering out youth/women."""
+        hdrs = {"Authorization": f"Token {api_key}"}
+        try:
+            res = _req.get(f"{BSD_BASE}/teams/", headers=hdrs, params={"name": team_name, "limit": 10}, timeout=10)
+            if res.status_code == 200:
+                results = res.json().get("results", [])
+                
+                # 1. Look for exact string match first
+                for t in results:
+                    if t["name"].strip().lower() == team_name.lower():
+                        return t["id"], t["name"]
+                        
+                # 2. Look for best match excluding youth and women
+                for t in results:
+                    n_lower = t["name"].lower()
+                    if team_name.lower() in n_lower and " u" not in n_lower and " w" not in n_lower:
+                        return t["id"], t["name"]
+                        
+                if results:
+                    return results[0]["id"], results[0]["name"]
+        except: pass
+        return None, None
+
     def fetch_nation_last5(team_name, api_key):
-        """Fetches the last 5 real-world fixtures for a national team (including friendlies)."""
+        """Fetches the absolute latest 5 fixtures for the strict national team."""
         fc = load_nfc()
         entry = fc.get(team_name, {})
         age = _time.time() - entry.get("fetched_at", 0)
         if entry and age < CACHE_TTL:
             return entry.get("matches", []), True, entry.get("bsd_id")
 
-        # Resolve real team ID from BSD
-        team_id, matched_name = bsd_find_team_id(team_name, api_key)
+        team_id, matched_name = get_strict_nation_id(team_name, api_key)
         if not team_id: return [], False, None
 
         hdrs = {"Authorization": f"Token {api_key}"}
-        from datetime import datetime, timedelta
-        
-        # Look back 365 days since international breaks are infrequent
-        date_from = (datetime.utcnow() - timedelta(days=365)).strftime("%Y-%m-%dT00:00:00Z")
         try:
+            # We omit the date_from bounding box so the API simply returns their last finished games
             r = _req.get(f"{BSD_BASE}/teams/{team_id}/fixtures/", headers=hdrs,
-                         params={"status":"finished","limit":5,"date_from":date_from}, timeout=15)
+                         params={"status":"finished","limit":10}, timeout=15)
             if r.status_code != 200: return [], False, team_id
         except: return [], False, team_id
 
+        # The API typically returns sorted, but we limit to 5 just in case
+        fixtures_data = r.json().get("results", [])[:5]
         results = []
-        for fix in r.json().get("results", []):
+        
+        for fix in fixtures_data:
             fid        = fix.get("id", 0)
             home_id    = fix.get("home_team_id", 0)
             home_goals = fix.get("home_score") or 0
@@ -1291,7 +1314,6 @@ elif app_mode == "🏆 World Cup Scout":
         if not last5: return None, None
         avg_s = sum(m["scored"] for m in last5) / len(last5)
         avg_c = sum(m["conceded"] for m in last5) / len(last5)
-        # Slightly boosted multipliers for national teams due to lower average goal counts
         return min(99, int(60 + avg_s * 10.5)), max(60, min(99, int(99 - avg_c * 10.5)))
 
     def best_nat_formation(last5):
@@ -1302,43 +1324,60 @@ elif app_mode == "🏆 World Cup Scout":
         return max(counts, key=counts.get) if counts else None
 
     def load_nation_squad(team_name, team_id, api_key):
-        """Silently fetches the real-world national squad so the Lineup builder works."""
-        if team_name in players_db and players_db[team_name]:
+        """Fetches the squad, or generates a clean fallback squad if BSD returns empty."""
+        roster = []
+        if team_name in players_db and len(players_db[team_name]) >= 11:
             return True
-        if not team_id: return False
-        hdrs = {"Authorization": f"Token {api_key}"}
-        try:
-            r = _req.get(f"{BSD_BASE}/players/", headers=hdrs, params={"team_id": team_id, "limit": 100}, timeout=12)
-            if r.status_code == 200:
-                SPEC_MAP = {
-                    "GK":"GK","CB":"DF","RB":"DF","LB":"DF","RWB":"DF","LWB":"DF",
-                    "CM":"MF","CDM":"MF","DM":"MF","CAM":"MF","AM":"MF",
-                    "RM":"FW","LM":"FW","RW":"FW","LW":"FW","RWF":"FW","LWF":"FW",
-                    "ST":"FW","CF":"FW","SS":"FW",
-                }
-                GEN_MAP = {"G":"GK","D":"DF","M":"MF","F":"FW"}
-                roster = []
-                for p in r.json().get("results", []):
-                    name = p.get("name") or p.get("short_name","")
-                    if not name or name.strip() in ("","None","null"): continue
-                    spec = str(p.get("specific_position","")).strip().upper()
-                    gen  = str(p.get("position","M")).strip().upper()
-                    pos  = SPEC_MAP.get(spec) or GEN_MAP.get(gen, "MF")
-                    roster.append({
-                        "Name": name.strip(), "Pos": pos, "SpecPos": spec or gen,
-                        "Min": 0, "G_A": 0
-                    })
-                if roster:
-                    players_db[team_name] = roster
-                    try:
-                        with open("players.json","w",encoding="utf-8") as f:
-                            json.dump(players_db, f, indent=2, ensure_ascii=False)
-                    except: pass
-                    return True
-        except: pass
-        return False
+            
+        if team_id:
+            hdrs = {"Authorization": f"Token {api_key}"}
+            try:
+                r = _req.get(f"{BSD_BASE}/players/", headers=hdrs, params={"team_id": team_id, "limit": 100}, timeout=12)
+                if r.status_code == 200:
+                    SPEC_MAP = {
+                        "GK":"GK","CB":"DF","RB":"DF","LB":"DF","RWB":"DF","LWB":"DF",
+                        "CM":"MF","CDM":"MF","DM":"MF","CAM":"MF","AM":"MF",
+                        "RM":"FW","LM":"FW","RW":"FW","LW":"FW","RWF":"FW","LWF":"FW",
+                        "ST":"FW","CF":"FW","SS":"FW",
+                    }
+                    GEN_MAP = {"G":"GK","D":"DF","M":"MF","F":"FW"}
+                    for p in r.json().get("results", []):
+                        name = p.get("name") or p.get("short_name","")
+                        if not name or name.strip() in ("","None","null"): continue
+                        spec = str(p.get("specific_position","")).strip().upper()
+                        gen  = str(p.get("position","M")).strip().upper()
+                        pos  = SPEC_MAP.get(spec) or GEN_MAP.get(gen, "MF")
+                        roster.append({
+                            "Name": name.strip(), "Pos": pos, "SpecPos": spec or gen,
+                            "Min": 0, "G_A": 0
+                        })
+            except: pass
 
-    if st.button("🔍 Fetch Last 5 Matches & Generate Optimal Tactics", type="primary", use_container_width=True):
+        # FALLBACK: If API has no players for this nation, generate a tactical 11
+        if len(roster) < 11:
+            roster = [] # Clear incomplete data
+            generic_positions = ["GK", "RB", "RCB", "LCB", "LB", "RDM", "LDM", "CAM", "RW", "ST", "LW", "SUB1", "SUB2"]
+            for pos in generic_positions:
+                if pos in ["RW", "LW", "ST"]: gen_pos = "FW"
+                elif pos in ["RDM", "LDM", "CAM"]: gen_pos = "MF"
+                elif pos in ["RB", "RCB", "LCB", "LB"]: gen_pos = "DF"
+                else: gen_pos = "GK"
+                
+                roster.append({
+                    "Name": f"{team_name} {pos}", 
+                    "Pos": gen_pos, 
+                    "SpecPos": pos.replace("R","").replace("L","") if len(pos)>2 else pos, # Clean up the badge
+                    "Min": 0, "G_A": 0, "fallback": True
+                })
+
+        players_db[team_name] = roster
+        try:
+            with open("players.json","w",encoding="utf-8") as f:
+                json.dump(players_db, f, indent=2, ensure_ascii=False)
+        except: pass
+        return True
+
+    if st.button("🔍 Fetch Form & Generate Optimal Tactics", type="primary", use_container_width=True):
         if home_team == away_team:
             st.error("🚨 Invalid Matchup: A nation cannot play against itself.")
         else:
@@ -1346,7 +1385,7 @@ elif app_mode == "🏆 World Cup Scout":
             if not bsd_key:
                 st.error("🚨 BSD_API_KEY missing from Streamlit Secrets.")
             else:
-                with st.spinner(f"📡 Fetching last 5 matches for {home_team} and {away_team}..."):
+                with st.spinner(f"📡 Fetching latest forms for {home_team} and {away_team}..."):
                     
                     # 1. Fetch dynamic form
                     h_matches, h_cached, h_id = fetch_nation_last5(home_team, bsd_key)
@@ -1419,7 +1458,6 @@ elif app_mode == "🏆 World Cup Scout":
                     # 6. Starting Lineup
                     st.markdown(f"### 👕 Recommended Starting XI — {best_form}")
                     
-                    # Fetch squad dynamically if it's not already cached locally
                     load_nation_squad(home_team, h_id, bsd_key)
                     
                     xi = select_starting_xi(home_team, best_form)
@@ -1438,4 +1476,4 @@ elif app_mode == "🏆 World Cup Scout":
                                 f"<span class='stat-text'>⏱ {p.get('Min',0)} mins &nbsp;⚽ {ga} G+A</span>"
                                 f"</div>", unsafe_allow_html=True)
                     else:
-                        st.info(f"Could not load player data for **{home_team}**. They might not have an active official squad logged in the database.")
+                        st.info(f"Could not load any data for **{home_team}**.")
