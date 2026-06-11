@@ -1200,14 +1200,14 @@ elif app_mode == "🏆 World Cup Scout":
     import requests as _req, time as _time
     
     st.markdown("## 🏆 World Cup 2026 Scout Engine")
-    st.write("Analyze international matchups. Reads from local database first, then dynamically fetches live form from the BSD API for new nations.")
+    st.write("Analyze international matchups. Extracts real formations from recent fixtures (including friendlies) to recommend the optimal game plan and starting XI.")
 
     # Hardcoded list of real World Cup nations
     WC_NATIONS = sorted([
         "Argentina", "France", "England", "Brazil", "Belgium", "Netherlands", "Portugal",
         "Spain", "Italy", "Croatia", "United States", "Mexico", "Germany", "Morocco",
         "Switzerland", "Uruguay", "Colombia", "Senegal", "Japan", "South Korea",
-        "Nigeria", "Ivory Coast", "Ghana", "Cameroon", "Canada", "Australia", "Ecuador"
+        "Nigeria", "Ivory Coast", "Ghana", "Cameroon", "Canada", "Australia", "Ecuador", "South Africa"
     ])
 
     # Merge with any nations already cached in your teams.json
@@ -1215,13 +1215,12 @@ elif app_mode == "🏆 World Cup Scout":
 
     col1, col2 = st.columns(2)
     with col1:
-        home_team = st.selectbox("🏠 Home Nation", NATION_DROPDOWN, index=NATION_DROPDOWN.index("Argentina") if "Argentina" in NATION_DROPDOWN else 0)
+        home_team = st.selectbox("🏠 Your Nation", NATION_DROPDOWN, index=NATION_DROPDOWN.index("Portugal") if "Portugal" in NATION_DROPDOWN else 0)
     with col2:
-        away_team = st.selectbox("✈️ Away Nation", NATION_DROPDOWN, index=NATION_DROPDOWN.index("France") if "France" in NATION_DROPDOWN else 1)
+        away_team = st.selectbox("✈️ Opponent Nation", NATION_DROPDOWN, index=NATION_DROPDOWN.index("France") if "France" in NATION_DROPDOWN else 1)
         
     st.markdown("---")
 
-    # Local caching for national forms
     NAT_FORM_CACHE = "nat_form_cache.json"
     CACHE_TTL = 86400
 
@@ -1234,16 +1233,16 @@ elif app_mode == "🏆 World Cup Scout":
         except: pass
 
     def fetch_nation_last5(team_name, api_key):
-        """Fetches the last 5 real-world fixtures for a national team."""
+        """Fetches the last 5 real-world fixtures for a national team (including friendlies)."""
         fc = load_nfc()
         entry = fc.get(team_name, {})
         age = _time.time() - entry.get("fetched_at", 0)
         if entry and age < CACHE_TTL:
-            return entry.get("matches", []), True
+            return entry.get("matches", []), True, entry.get("bsd_id")
 
         # Resolve real team ID from BSD
         team_id, matched_name = bsd_find_team_id(team_name, api_key)
-        if not team_id: return [], False
+        if not team_id: return [], False, None
 
         hdrs = {"Authorization": f"Token {api_key}"}
         from datetime import datetime, timedelta
@@ -1253,8 +1252,8 @@ elif app_mode == "🏆 World Cup Scout":
         try:
             r = _req.get(f"{BSD_BASE}/teams/{team_id}/fixtures/", headers=hdrs,
                          params={"status":"finished","limit":5,"date_from":date_from}, timeout=15)
-            if r.status_code != 200: return [], False
-        except: return [], False
+            if r.status_code != 200: return [], False, team_id
+        except: return [], False, team_id
 
         results = []
         for fix in r.json().get("results", []):
@@ -1286,7 +1285,7 @@ elif app_mode == "🏆 World Cup Scout":
 
         fc[team_name] = {"fetched_at": _time.time(), "matches": results, "bsd_id": team_id, "bsd_name": matched_name}
         save_nfc(fc)
-        return results, False
+        return results, False, team_id
 
     def compute_nat_ratings(last5):
         if not last5: return None, None
@@ -1301,8 +1300,45 @@ elif app_mode == "🏆 World Cup Scout":
             f = m.get("formation","Unknown")
             if f and f != "Unknown": counts[f] = counts.get(f,0)+1
         return max(counts, key=counts.get) if counts else None
-        
-    if st.button("⚙️ Analyse Matchup", type="primary", use_container_width=True):
+
+    def load_nation_squad(team_name, team_id, api_key):
+        """Silently fetches the real-world national squad so the Lineup builder works."""
+        if team_name in players_db and players_db[team_name]:
+            return True
+        if not team_id: return False
+        hdrs = {"Authorization": f"Token {api_key}"}
+        try:
+            r = _req.get(f"{BSD_BASE}/players/", headers=hdrs, params={"team_id": team_id, "limit": 100}, timeout=12)
+            if r.status_code == 200:
+                SPEC_MAP = {
+                    "GK":"GK","CB":"DF","RB":"DF","LB":"DF","RWB":"DF","LWB":"DF",
+                    "CM":"MF","CDM":"MF","DM":"MF","CAM":"MF","AM":"MF",
+                    "RM":"FW","LM":"FW","RW":"FW","LW":"FW","RWF":"FW","LWF":"FW",
+                    "ST":"FW","CF":"FW","SS":"FW",
+                }
+                GEN_MAP = {"G":"GK","D":"DF","M":"MF","F":"FW"}
+                roster = []
+                for p in r.json().get("results", []):
+                    name = p.get("name") or p.get("short_name","")
+                    if not name or name.strip() in ("","None","null"): continue
+                    spec = str(p.get("specific_position","")).strip().upper()
+                    gen  = str(p.get("position","M")).strip().upper()
+                    pos  = SPEC_MAP.get(spec) or GEN_MAP.get(gen, "MF")
+                    roster.append({
+                        "Name": name.strip(), "Pos": pos, "SpecPos": spec or gen,
+                        "Min": 0, "G_A": 0
+                    })
+                if roster:
+                    players_db[team_name] = roster
+                    try:
+                        with open("players.json","w",encoding="utf-8") as f:
+                            json.dump(players_db, f, indent=2, ensure_ascii=False)
+                    except: pass
+                    return True
+        except: pass
+        return False
+
+    if st.button("🔍 Fetch Last 5 Matches & Generate Optimal Tactics", type="primary", use_container_width=True):
         if home_team == away_team:
             st.error("🚨 Invalid Matchup: A nation cannot play against itself.")
         else:
@@ -1310,11 +1346,11 @@ elif app_mode == "🏆 World Cup Scout":
             if not bsd_key:
                 st.error("🚨 BSD_API_KEY missing from Streamlit Secrets.")
             else:
-                with st.spinner(f"Fetching squad form and synthesizing ratings for {home_team} vs {away_team}..."):
+                with st.spinner(f"📡 Fetching last 5 matches for {home_team} and {away_team}..."):
                     
                     # 1. Fetch dynamic form
-                    h_matches, h_cached = fetch_nation_last5(home_team, bsd_key)
-                    a_matches, a_cached = fetch_nation_last5(away_team, bsd_key)
+                    h_matches, h_cached, h_id = fetch_nation_last5(home_team, bsd_key)
+                    a_matches, a_cached, a_id = fetch_nation_last5(away_team, bsd_key)
 
                     h_att_d, h_def_d = compute_nat_ratings(h_matches)
                     a_att_d, a_def_d = compute_nat_ratings(a_matches)
@@ -1333,8 +1369,6 @@ elif app_mode == "🏆 World Cup Scout":
 
                     # 3. Model Prediction
                     best_prob, best_form = 0, ""
-                    all_scores = []
-
                     for fc_code, fc_name in formations_map.items():
                         test = pd.DataFrame({
                             "Formation": [fc_code], "Team_Attack": [h_att],
@@ -1348,33 +1382,60 @@ elif app_mode == "🏆 World Cup Scout":
                             opp_backs = int(a_habit.split("-")[0])
                             if opp_backs >= 5 and fc_name.startswith("3"): prob -= 5.0
 
-                        all_scores.append({"Formation": fc_name, "Win Probability (%)": round(prob, 1)})
                         if prob > best_prob:
                             best_prob = prob
                             best_form = fc_name
                             
-                    all_scores = sorted(all_scores, key=lambda x: x["Win Probability (%)"], reverse=True)
+                    # 4. Tactical Projection Header
+                    st.markdown("---")
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("✅ Recommended Formation", best_form)
+                    r2.metric("🤖 AI Win Probability", f"{best_prob:.1f}%")
+                    r3.metric("📐 Opp. Usual Formation", a_habit or "Unknown")
 
-                    # 4. Display UI
-                    st.subheader("Tactical Projection")
-                    st.success(f"**Projected Formation:** {best_form} (Win Probability: {round(best_prob, 1)}%)")
+                    # 5. Form Comparison
+                    st.markdown("### 📋 Last 5 Matches")
+                    fc1, fc2 = st.columns(2)
+
+                    def render_nat_form(tname, last5, att, dfn, cached):
+                        label = "📦 cached" if cached else "🔴 live"
+                        st.markdown(f"**{tname}** <span style='font-size:12px;color:#6b8f72'>({label})</span>", unsafe_allow_html=True)
+                        st.caption(f"⚔️ Attack: {att} | 🛡️ Defence: {dfn}")
+                        if not last5:
+                            st.write("No recent matches found.")
+                        for m in last5:
+                            col = {"W":"#22c55e","D":"#f59e0b","L":"#ef4444"}.get(m["result"],"#6b8f72")
+                            badge = f"<span style='background:{col};color:#000;padding:1px 7px;border-radius:4px;font-weight:700;font-size:11px'>{m['result']}</span>"
+                            st.markdown(
+                                f"{badge} &nbsp;vs <b>{m['opponent']}</b> &nbsp;"
+                                f"{m['scored']}–{m['conceded']} &nbsp;"
+                                f"<code style='font-size:11px;background:#0d1f10;padding:2px 5px;border-radius:3px'>{m['formation']}</code> "
+                                f"<span style='font-size:11px;color:#6b8f72'>{m['competition']}</span>",
+                                unsafe_allow_html=True)
+
+                    with fc1: render_nat_form(home_team, h_matches, h_att, h_def, h_cached)
+                    with fc2: render_nat_form(away_team, a_matches, a_att, a_def, a_cached)
+
+                    # 6. Starting Lineup
+                    st.markdown(f"### 👕 Recommended Starting XI — {best_form}")
                     
-                    st.markdown("### ⚔️ Squad Strength Comparison")
-                    mcol1, mcol2 = st.columns(2)
+                    # Fetch squad dynamically if it's not already cached locally
+                    load_nation_squad(home_team, h_id, bsd_key)
                     
-                    with mcol1:
-                        st.info(f"**{home_team}**")
-                        st.metric("Attack Power", h_att)
-                        st.metric("Defensive Integrity", h_def)
-                        if not h_att_d: st.caption("⚠️ Using fallback database ratings (No recent fixtures found)")
-                        
-                    with mcol2:
-                        st.error(f"**{away_team}**")
-                        st.metric("Attack Power", a_att)
-                        st.metric("Defensive Integrity", a_def)
-                        if not a_att_d: st.caption("⚠️ Using fallback database ratings (No recent fixtures found)")
-                        
-                    with st.expander("📊 View All Formation Probabilities"):
-                        df_formations = pd.DataFrame(all_scores)
-                        df_formations.index += 1
-                        st.table(df_formations)
+                    xi = select_starting_xi(home_team, best_form)
+                    if xi:
+                        for p in xi:
+                            warn = " ⚠️" if p.get("fallback") else ""
+                            ga   = f"{p['G_A']:.2f}" if isinstance(p['G_A'], float) else str(p['G_A'])
+                            spec = str(p.get("SpecPos","")).strip()
+                            role = p.get("_role", classify_player(p))
+                            badge = spec if spec and spec.upper() not in ("G","D","M","F") else role
+                            name  = str(p.get("Name","")).strip()
+                            if not name or name in ("None","null"): continue
+                            st.markdown(
+                                f"<div class='player-card'>"
+                                f"<span><span class='pos-badge'>{badge}</span>{name}{warn}</span>"
+                                f"<span class='stat-text'>⏱ {p.get('Min',0)} mins &nbsp;⚽ {ga} G+A</span>"
+                                f"</div>", unsafe_allow_html=True)
+                    else:
+                        st.info(f"Could not load player data for **{home_team}**. They might not have an active official squad logged in the database.")
