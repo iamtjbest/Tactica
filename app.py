@@ -1194,140 +1194,187 @@ INSTRUCTIONS:
             st.rerun()
 
 # =============================================================================
-# MODULE 6: WORLD CUP SCOUT (Native Streamlit)
+# MODULE 6: WORLD CUP SCOUT
 # =============================================================================
 elif app_mode == "🏆 World Cup Scout":
-    import requests as _req
+    import requests as _req, time as _time
     
     st.markdown("## 🏆 World Cup 2026 Scout Engine")
-    st.write("Analyze international matchups using dynamic player caps and BSD ratings directly within Streamlit.")
+    st.write("Analyze international matchups. Reads from local database first, then dynamically fetches live form from the BSD API for new nations.")
 
-    # Pull the BSD key directly from your Streamlit secrets
-    bsd_key = st.secrets.get("BSD_API_KEY", "")
+    # Hardcoded list of real World Cup nations
+    WC_NATIONS = sorted([
+        "Argentina", "France", "England", "Brazil", "Belgium", "Netherlands", "Portugal",
+        "Spain", "Italy", "Croatia", "United States", "Mexico", "Germany", "Morocco",
+        "Switzerland", "Uruguay", "Colombia", "Senegal", "Japan", "South Korea",
+        "Nigeria", "Ivory Coast", "Ghana", "Cameroon", "Canada", "Australia", "Ecuador"
+    ])
 
-    @st.cache_data(ttl=43200) # Cache for 12 hours
-    def get_wc_teams(api_key):
-        if not api_key: return []
-        hdrs = {"Authorization": f"Token {api_key}"}
-        try:
-            # Native call directly to the BSD API instead of a backend
-            res = _req.get(f"{BSD_BASE}/worldcup/squads/", headers=hdrs, params={"status": "official"}, timeout=15)
-            if res.status_code == 200:
-                return res.json().get("results", [])
-        except Exception as e:
-            st.error(f"Failed to fetch World Cup teams from BSD: {e}")
-        return []
+    # Merge with any nations already cached in your teams.json
+    NATION_DROPDOWN = sorted(set(WC_NATIONS) | {k for k in teams_db.keys() if k in WC_NATIONS})
 
-    def rate_national_squad(squad_list):
-        """Native rating algorithm for national teams."""
-        if not squad_list: return 75, 75
+    col1, col2 = st.columns(2)
+    with col1:
+        home_team = st.selectbox("🏠 Home Nation", NATION_DROPDOWN, index=NATION_DROPDOWN.index("Argentina") if "Argentina" in NATION_DROPDOWN else 0)
+    with col2:
+        away_team = st.selectbox("✈️ Away Nation", NATION_DROPDOWN, index=NATION_DROPDOWN.index("France") if "France" in NATION_DROPDOWN else 1)
         
-        att_scores, def_scores = [], []
-        for p in squad_list:
-            caps = p.get("caps", 0) or 0
-            pos = str(p.get("position", "MF")).upper()
-            
-            # Base score 75, up to +15 for caps (max 100)
-            score = 75.0 + min(15.0, (caps / 100.0) * 15.0)
-            
-            if pos in ("FW", "MF"):
-                att_scores.append(score)
-            elif pos == "DF":
-                def_scores.append(score)
-                
-        def top_avg(scores, n=4):
-            top = sorted(scores, reverse=True)[:n]
-            return int(sum(top) / len(top)) if top else 75
+    st.markdown("---")
 
-        return top_avg(att_scores), top_avg(def_scores)
+    # Local caching for national forms
+    NAT_FORM_CACHE = "nat_form_cache.json"
+    CACHE_TTL = 86400
 
-    def analyze_wc_match(team_id, opp_id, api_key):
+    def load_nfc():
+        try: return json.load(open(NAT_FORM_CACHE, encoding="utf-8"))
+        except: return {}
+
+    def save_nfc(d):
+        try: json.dump(d, open(NAT_FORM_CACHE,"w",encoding="utf-8"), indent=2)
+        except: pass
+
+    def fetch_nation_last5(team_name, api_key):
+        """Fetches the last 5 real-world fixtures for a national team."""
+        fc = load_nfc()
+        entry = fc.get(team_name, {})
+        age = _time.time() - entry.get("fetched_at", 0)
+        if entry and age < CACHE_TTL:
+            return entry.get("matches", []), True
+
+        # Resolve real team ID from BSD
+        team_id, matched_name = bsd_find_team_id(team_name, api_key)
+        if not team_id: return [], False
+
         hdrs = {"Authorization": f"Token {api_key}"}
+        from datetime import datetime, timedelta
         
+        # Look back 365 days since international breaks are infrequent
+        date_from = (datetime.utcnow() - timedelta(days=365)).strftime("%Y-%m-%dT00:00:00Z")
         try:
-            my_squad = _req.get(f"{BSD_BASE}/worldcup/squads/{team_id}/", headers=hdrs, timeout=15).json().get("results", [])
-            opp_squad = _req.get(f"{BSD_BASE}/worldcup/squads/{opp_id}/", headers=hdrs, timeout=15).json().get("results", [])
-            
-            my_att, my_def = rate_national_squad(my_squad)
-            opp_att, opp_def = rate_national_squad(opp_squad)
-            
-            best_prob, best_form = 0, ""
-            all_scores = []
-            
-            # Use the ML model already loaded globally in app.py
-            for fc_code, fc_name in formations_map.items():
-                test = pd.DataFrame({
-                    "Formation": [fc_code], "Team_Attack": [my_att],
-                    "Team_Defense": [my_def], "Opp_Attack": [opp_att],
-                    "Opp_Defense": [opp_def]
-                })
-                prob = float(model.predict_proba(test)[0][1] * 100)
-                all_scores.append({"Formation": fc_name, "Win Probability (%)": round(prob, 1)})
-                if prob > best_prob:
-                    best_prob = prob
-                    best_form = fc_name
-                    
-            all_scores = sorted(all_scores, key=lambda x: x["Win Probability (%)"], reverse=True)
-            
-            return {
-                "my_attack": my_att, "my_defence": my_def, "my_squad_count": len(my_squad),
-                "opp_attack": opp_att, "opp_defence": opp_def, "opp_squad_count": len(opp_squad),
-                "best_formation": best_form, "probability": round(best_prob, 1),
-                "all_formations": all_scores
-            }
-        except Exception as e:
-            st.error(f"Prediction failed: {e}")
-            return None
+            r = _req.get(f"{BSD_BASE}/teams/{team_id}/fixtures/", headers=hdrs,
+                         params={"status":"finished","limit":5,"date_from":date_from}, timeout=15)
+            if r.status_code != 200: return [], False
+        except: return [], False
 
-    if not bsd_key:
-        st.error("🚨 BSD_API_KEY missing from Streamlit Secrets!")
-    else:
-        wc_teams = get_wc_teams(bsd_key)
+        results = []
+        for fix in r.json().get("results", []):
+            fid        = fix.get("id", 0)
+            home_id    = fix.get("home_team_id", 0)
+            home_goals = fix.get("home_score") or 0
+            away_goals = fix.get("away_score") or 0
+            is_home    = (home_id == team_id)
+            scored     = home_goals if is_home else away_goals
+            conceded   = away_goals if is_home else home_goals
+            opp_name   = fix.get("away_team","?") if is_home else fix.get("home_team","?")
+            competition = LEAGUE_NAMES.get(fix.get("league_id", 0), "International")
+            result     = "W" if scored > conceded else ("D" if scored == conceded else "L")
 
-        if not wc_teams:
-            st.warning("Fetching World Cup squad data from BSD API...")
+            formation_used = "Unknown"
+            try:
+                lr = _req.get(f"{BSD_BASE}/events/{fid}/lineups/", headers=hdrs, timeout=10)
+                if lr.status_code == 200:
+                    ld = lr.json()
+                    if ld.get("lineup_status") != "unavailable" and ld.get("lineups"):
+                        side = "home" if is_home else "away"
+                        formation_used = (ld.get("lineups").get(side) or {}).get("formation", "Unknown")
+            except: pass
+
+            results.append({
+                "fixture_id": fid, "formation": formation_used, "scored": scored,
+                "conceded": conceded, "result": result, "competition": competition, "opponent": opp_name
+            })
+
+        fc[team_name] = {"fetched_at": _time.time(), "matches": results, "bsd_id": team_id, "bsd_name": matched_name}
+        save_nfc(fc)
+        return results, False
+
+    def compute_nat_ratings(last5):
+        if not last5: return None, None
+        avg_s = sum(m["scored"] for m in last5) / len(last5)
+        avg_c = sum(m["conceded"] for m in last5) / len(last5)
+        # Slightly boosted multipliers for national teams due to lower average goal counts
+        return min(99, int(60 + avg_s * 10.5)), max(60, min(99, int(99 - avg_c * 10.5)))
+
+    def best_nat_formation(last5):
+        counts = {}
+        for m in last5:
+            f = m.get("formation","Unknown")
+            if f and f != "Unknown": counts[f] = counts.get(f,0)+1
+        return max(counts, key=counts.get) if counts else None
+        
+    if st.button("⚙️ Analyse Matchup", type="primary", use_container_width=True):
+        if home_team == away_team:
+            st.error("🚨 Invalid Matchup: A nation cannot play against itself.")
         else:
-            team_options = {t.get('name') or t.get('team_name'): t.get('team_id') or t.get('id') for t in wc_teams}
-            team_names = list(team_options.keys())
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                home_team = st.selectbox("🏠 Home Nation", team_names, index=0)
-            with col2:
-                away_team = st.selectbox("✈️ Away Nation", team_names, index=1 if len(team_names) > 1 else 0)
-                
-            st.markdown("---")
-            
-            if st.button("⚙️ Analyse Matchup", type="primary", use_container_width=True):
-                if home_team == away_team:
-                    st.error("🚨 Invalid Matchup: A nation cannot play against itself.")
-                else:
-                    with st.spinner(f"Fetching squads and synthesizing ratings for {home_team} vs {away_team}..."):
-                        h_id = team_options[home_team]
-                        a_id = team_options[away_team]
-                        
-                        data = analyze_wc_match(h_id, a_id, bsd_key)
-                        
-                        if data:
-                            st.subheader("Tactical Projection")
-                            st.success(f"**Projected Formation:** {data['best_formation']} (Win Probability: {data['probability']}%)")
+            bsd_key = st.secrets.get("BSD_API_KEY", "")
+            if not bsd_key:
+                st.error("🚨 BSD_API_KEY missing from Streamlit Secrets.")
+            else:
+                with st.spinner(f"Fetching squad form and synthesizing ratings for {home_team} vs {away_team}..."):
+                    
+                    # 1. Fetch dynamic form
+                    h_matches, h_cached = fetch_nation_last5(home_team, bsd_key)
+                    a_matches, a_cached = fetch_nation_last5(away_team, bsd_key)
+
+                    h_att_d, h_def_d = compute_nat_ratings(h_matches)
+                    a_att_d, a_def_d = compute_nat_ratings(a_matches)
+
+                    # 2. Database Fallbacks
+                    h_fb = teams_db.get(home_team, {"Attack": 82, "Defense": 80})
+                    a_fb = teams_db.get(away_team, {"Attack": 82, "Defense": 80})
+
+                    h_att = h_att_d or h_fb.get("Attack", 82)
+                    h_def = h_def_d or h_fb.get("Defense", 80)
+                    a_att = a_att_d or a_fb.get("Attack", 82)
+                    a_def = a_def_d or a_fb.get("Defense", 80)
+
+                    h_habit = best_nat_formation(h_matches)
+                    a_habit = best_nat_formation(a_matches)
+
+                    # 3. Model Prediction
+                    best_prob, best_form = 0, ""
+                    all_scores = []
+
+                    for fc_code, fc_name in formations_map.items():
+                        test = pd.DataFrame({
+                            "Formation": [fc_code], "Team_Attack": [h_att],
+                            "Team_Defense": [h_def], "Opp_Attack": [a_att],
+                            "Opp_Defense": [a_def]
+                        })
+                        prob = float(model.predict_proba(test)[0][1] * 100)
+
+                        if h_habit and fc_name == h_habit: prob += 5.0
+                        if a_habit and a_habit[0].isdigit():
+                            opp_backs = int(a_habit.split("-")[0])
+                            if opp_backs >= 5 and fc_name.startswith("3"): prob -= 5.0
+
+                        all_scores.append({"Formation": fc_name, "Win Probability (%)": round(prob, 1)})
+                        if prob > best_prob:
+                            best_prob = prob
+                            best_form = fc_name
                             
-                            st.markdown("### ⚔️ Squad Strength Comparison")
-                            mcol1, mcol2 = st.columns(2)
-                            
-                            with mcol1:
-                                st.info(f"**{home_team}**")
-                                st.metric("Attack Power", data['my_attack'])
-                                st.metric("Defensive Integrity", data['my_defence'])
-                                st.caption(f"Based on {data['my_squad_count']} squad players")
-                                
-                            with mcol2:
-                                st.error(f"**{away_team}**")
-                                st.metric("Attack Power", data['opp_attack'])
-                                st.metric("Defensive Integrity", data['opp_defence'])
-                                st.caption(f"Based on {data['opp_squad_count']} squad players")
-                                
-                            with st.expander("📊 View All Formation Probabilities"):
-                                df_formations = pd.DataFrame(data['all_formations'])
-                                df_formations.index += 1
-                                st.table(df_formations)
+                    all_scores = sorted(all_scores, key=lambda x: x["Win Probability (%)"], reverse=True)
+
+                    # 4. Display UI
+                    st.subheader("Tactical Projection")
+                    st.success(f"**Projected Formation:** {best_form} (Win Probability: {round(best_prob, 1)}%)")
+                    
+                    st.markdown("### ⚔️ Squad Strength Comparison")
+                    mcol1, mcol2 = st.columns(2)
+                    
+                    with mcol1:
+                        st.info(f"**{home_team}**")
+                        st.metric("Attack Power", h_att)
+                        st.metric("Defensive Integrity", h_def)
+                        if not h_att_d: st.caption("⚠️ Using fallback database ratings (No recent fixtures found)")
+                        
+                    with mcol2:
+                        st.error(f"**{away_team}**")
+                        st.metric("Attack Power", a_att)
+                        st.metric("Defensive Integrity", a_def)
+                        if not a_att_d: st.caption("⚠️ Using fallback database ratings (No recent fixtures found)")
+                        
+                    with st.expander("📊 View All Formation Probabilities"):
+                        df_formations = pd.DataFrame(all_scores)
+                        df_formations.index += 1
+                        st.table(df_formations)
