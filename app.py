@@ -1207,7 +1207,7 @@ elif app_mode == "🏆 World Cup Scout":
         "Argentina", "France", "England", "Brazil", "Belgium", "Netherlands", "Portugal",
         "Spain", "Italy", "Croatia", "United States", "Mexico", "Germany", "Morocco",
         "Switzerland", "Uruguay", "Colombia", "Senegal", "Japan", "South Korea",
-        "Nigeria", "Ivory Coast", "Ghana", "Cameroon", "Canada", "Australia", "Ecuador"
+        "Nigeria", "Ivory Coast", "Ghana", "Cameroon", "Canada", "Australia", "Ecuador", "South Africa"
     ])
 
     # Merge with any nations already cached in your teams.json
