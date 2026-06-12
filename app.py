@@ -1204,10 +1204,19 @@ elif app_mode == "🏆 World Cup Scout":
 
     # Hardcoded list of real World Cup nations
     WC_NATIONS = sorted([
-        "Argentina", "France", "England", "Brazil", "Belgium", "Netherlands", "Portugal",
-        "Spain", "Italy", "Croatia", "United States", "Mexico", "Germany", "Morocco",
-        "Switzerland", "Uruguay", "Colombia", "Senegal", "Japan", "South Korea",
-        "Nigeria", "Ivory Coast", "Ghana", "Cameroon", "Canada", "Australia", "Ecuador", "South Africa"
+        "Mexico", "South Africa", "South Korea", "Czechia",
+        "Canada", "Bosnia and Herzegovina", "Qatar", "Switzerland",
+        "Brazil", "Morocco", "Haiti", "Scotland",
+        "United States", "Paraguay", "Australia", "Türkiye",
+        "Germany", "Curaçao", "Ivory Coast", "Ecuador",
+        "Netherlands", "Japan", "Sweden", "Tunisia",
+        "Belgium", "Egypt", "Iran", "New Zealand",
+        "Spain", "Cape Verde", "Saudi Arabia", "Uruguay",
+        "France", "Senegal", "Iraq", "Norway",
+        "Argentina", "Algeria", "Austria", "Jordan",
+        "Portugal", "DR Congo", "Uzbekistan", "Colombia",
+        "England", "Croatia", "Ghana", "Panama"
+        
     ])
 
     # Merge with any nations already cached in your teams.json
