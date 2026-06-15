@@ -1217,7 +1217,6 @@ elif app_mode == "🏆 World Cup Scout":
         "Argentina", "Algeria", "Austria", "Jordan",
         "Portugal", "DR Congo", "Uzbekistan", "Colombia",
         "England", "Croatia", "Ghana", "Panama"
-        
     ])
 
     # Merge with any nations already cached in your teams.json
@@ -1279,9 +1278,12 @@ elif app_mode == "🏆 World Cup Scout":
 
         hdrs = {"Authorization": f"Token {api_key}"}
         try:
-            # We omit the date_from bounding box so the API simply returns their last finished games
+            from datetime import datetime, timedelta
+            # National teams play rarely. Look back 365 days to guarantee we find 5 matches.
+            date_from = (datetime.utcnow() - timedelta(days=365)).strftime("%Y-%m-%dT00:00:00Z")
+            
             r = _req.get(f"{BSD_BASE}/teams/{team_id}/fixtures/", headers=hdrs,
-                         params={"status":"finished","limit":10}, timeout=15)
+                         params={"status":"finished","limit":10, "date_from": date_from}, timeout=15)
             if r.status_code != 200: return [], False, team_id
         except: return [], False, team_id
 
@@ -1387,15 +1389,13 @@ elif app_mode == "🏆 World Cup Scout":
         except: pass
         return True
 
-    # ---- CACHE CLEANUP BUTTON ----
-    if st.button("🗑️ Clear World Cup Cache", use_container_width=True):
-        for cache_file in ["nat_form_cache.json", "squad_cache.json", "form_cache.json", "players.json"]:
-            if os.path.exists(cache_file):
-                os.remove(cache_file)
-        st.success("Cache wiped! You can now fetch fresh live data.")
-    # ------------------------------
-
     if st.button("🔍 Fetch Form & Generate Optimal Tactics", type="primary", use_container_width=True):
+        # Force a cache wipe silently behind the scenes every time they click the button
+        for cache_file in ["nat_form_cache.json", "squad_cache.json", "form_cache.json"]:
+            if os.path.exists(cache_file):
+                try: os.remove(cache_file)
+                except: pass
+
         if home_team == away_team:
             st.error("🚨 Invalid Matchup: A nation cannot play against itself.")
         else:
