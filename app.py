@@ -891,4 +891,4 @@ elif app_mode == "🧠 Coach's Sandbox":
     if not roster:
         if api_key:
             st.info(f"ℹ️ No local data for **{my_team}**. Click below to fetch their squad from BSD now.")
-            if st.button(f"📥 Fetch {my_team}
+            if st.button(f" Fetch {my_team}
